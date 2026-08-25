@@ -54,7 +54,8 @@ struct OnboardingRootView: View {
             configStore: UserDefaultsIOSServerConfigStore(),
             tester: service,
             keyGenerator: { try service.generateEd25519Key() },
-            targetServerID: targetServerID
+            targetServerID: targetServerID,
+            serveCredentials: KeychainHermesServeCredentialStore()
         ))
     }
 
@@ -62,6 +63,8 @@ struct OnboardingRootView: View {
         NavigationStack {
             Group {
                 switch vm.step {
+                case .chooseConnection: ChooseConnectionStep(vm: vm)
+                case .serveDetails:    ServeDetailsStep(vm: vm)
                 case .serverDetails:   ServerDetailsStep(vm: vm)
                 case .keySource:       KeySourceStep(vm: vm)
                 case .generate:        GenerateKeyStep(vm: vm)
@@ -109,6 +112,90 @@ struct OnboardingRootView: View {
 
 // MARK: - Steps
 
+private struct ChooseConnectionStep: View {
+    let vm: OnboardingViewModel
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Text("How do you want to connect?")
+                .font(.title2)
+                .bold()
+            Text("Use a Hermes URL if the host is running `hermes serve` or `hermes dashboard`. SSH still works for existing servers.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(ScarfColor.foregroundMuted)
+                .padding(.horizontal)
+
+            VStack(spacing: 12) {
+                Button {
+                    vm.pickHermesURL()
+                } label: {
+                    Label("Hermes URL", systemImage: "link")
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                }
+                .buttonStyle(ScarfPrimaryButton())
+
+                Button {
+                    vm.pickSSH()
+                } label: {
+                    Label("SSH", systemImage: "key.fill")
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding()
+            Spacer()
+        }
+        .padding(.top)
+    }
+}
+
+private struct ServeDetailsStep: View {
+    let vm: OnboardingViewModel
+
+    var body: some View {
+        Form {
+            Section("Hermes URL") {
+                TextField("http://host:9119", text: Bindable(vm).serveURL)
+                    .textContentType(.URL)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                TextField("username (if required)", text: Bindable(vm).serveUsername)
+                    .textContentType(.username)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                SecureField("password (if required)", text: Bindable(vm).servePassword)
+                    .textContentType(.password)
+                TextField("nickname (optional)", text: Bindable(vm).displayName)
+                    .autocorrectionDisabled()
+            } footer: {
+                Text("The host must be running `hermes serve --host 0.0.0.0` (Hermes 0.18+). Scarf will call GET /api/status, then log in if the dashboard requires it.")
+            }
+
+            Section {
+                Button("Back") { vm.goBackToChooser() }
+                Button {
+                    Task { await vm.testServeConnection() }
+                } label: {
+                    HStack {
+                        Spacer()
+                        if vm.isWorking {
+                            ProgressView()
+                        } else {
+                            Text("Connect")
+                                .bold()
+                        }
+                        Spacer()
+                    }
+                }
+                .disabled(!vm.serveDetailsValidation.canAdvance || vm.isWorking)
+            }
+        }
+    }
+}
+
 private struct ServerDetailsStep: View {
     let vm: OnboardingViewModel
 
@@ -130,6 +217,7 @@ private struct ServerDetailsStep: View {
             }
 
             Section {
+                Button("Back") { vm.goBackToChooser() }
                 Button {
                     vm.advanceFromServerDetails()
                 } label: {
@@ -299,7 +387,9 @@ private struct TestConnectionStep: View {
         VStack(spacing: 16) {
             ProgressView()
                 .scaleEffect(1.2)
-            Text("Testing connection to \(vm.host)…")
+            Text(vm.connectionKind == .serve
+                 ? "Testing Hermes URL…"
+                 : "Testing connection to \(vm.host)…")
                 .foregroundStyle(ScarfColor.foregroundMuted)
         }
     }

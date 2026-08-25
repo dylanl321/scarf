@@ -26,7 +26,7 @@ import ScarfDesign
 struct ScarfGoTabRoot: View {
     let serverID: ServerID
     let config: IOSServerConfig
-    let key: SSHKeyBundle
+    let key: SSHKeyBundle?
     let onSoftDisconnect: @MainActor @Sendable () async -> Void
     let onForget: @MainActor @Sendable () async -> Void
 
@@ -54,7 +54,7 @@ struct ScarfGoTabRoot: View {
     init(
         serverID: ServerID,
         config: IOSServerConfig,
-        key: SSHKeyBundle,
+        key: SSHKeyBundle?,
         onSoftDisconnect: @escaping @MainActor @Sendable () async -> Void,
         onForget: @escaping @MainActor @Sendable () async -> Void
     ) {
@@ -79,6 +79,10 @@ struct ScarfGoTabRoot: View {
     /// without mutating the host's `active_profile`.
     private var effectiveConfig: IOSServerConfig {
         var resolved = config
+        if config.isServe {
+            resolved.serveProfile = coordinator.selectedProfile
+            return resolved
+        }
         resolved.remoteHome = HermesProfileScope.resolveHome(
             baseHome: config.remoteHome ?? HermesPathSet.defaultRemoteHome,
             profile: coordinator.selectedProfile
@@ -139,7 +143,14 @@ struct ScarfGoTabRoot: View {
             // site, and sessions. Read-only registry on iOS — add /
             // rename / archive happens in the Mac app.
             NavigationStack {
-                ProjectsListView(config: cfg)
+                if cfg.isServe {
+                    ServeNeedsSSHPlaceholder(
+                        title: "Projects",
+                        message: "Projects, kanban, and AGENTS.md process-cwd need an SSH connection. This Hermes URL server only exposes the dashboard REST API."
+                    )
+                } else {
+                    ProjectsListView(config: cfg)
+                }
             }
             .tabItem {
                 Label("Projects", systemImage: "square.grid.2x2")
@@ -244,8 +255,15 @@ private struct SystemTab: View {
     var body: some View {
         List {
             Section("Server") {
-                LabeledContent("Host", value: config.host)
-                    .listRowBackground(ScarfColor.backgroundSecondary)
+                if config.isServe, let url = config.serveBaseURL {
+                    LabeledContent("Hermes URL", value: url)
+                        .listRowBackground(ScarfColor.backgroundSecondary)
+                    LabeledContent("Connection", value: "Hermes URL")
+                        .listRowBackground(ScarfColor.backgroundSecondary)
+                } else {
+                    LabeledContent("Host", value: config.host)
+                        .listRowBackground(ScarfColor.backgroundSecondary)
+                }
                 if let user = config.user {
                     LabeledContent("User", value: user)
                         .listRowBackground(ScarfColor.backgroundSecondary)
@@ -257,14 +275,21 @@ private struct SystemTab: View {
             }
 
             Section("Features") {
-                NavigationLink {
-                    MemoryListView(config: config)
-                } label: {
-                    Label("Memory", systemImage: "brain.head.profile")
+                if config.isServe {
+                    Label("Memory files need SSH", systemImage: "brain.head.profile")
+                        .foregroundStyle(ScarfColor.foregroundMuted)
+                        .scarfGoCompactListRow()
+                        .listRowBackground(ScarfColor.backgroundSecondary)
+                } else {
+                    NavigationLink {
+                        MemoryListView(config: config)
+                    } label: {
+                        Label("Memory", systemImage: "brain.head.profile")
+                    }
+                    .scarfGoCompactListRow()
+                    .listRowBackground(ScarfColor.backgroundSecondary)
                 }
-                .scarfGoCompactListRow()
-                .listRowBackground(ScarfColor.backgroundSecondary)
-                if capabilitiesStore?.capabilities.hasCurator ?? false {
+                if !config.isServe, capabilitiesStore?.capabilities.hasCurator ?? false {
                     NavigationLink {
                         // `config` here is the profile-scoped effectiveConfig, so
                         // Curator's profile scoping rides on `paths` (remoteHome) —
@@ -300,6 +325,7 @@ private struct SystemTab: View {
             // None of these are capability-gated — the underlying
             // `hermes plugins/profile/webhook list` verbs exist on
             // both v0.11 and v0.12, so the read views work on either.
+            if !config.isServe {
             Section("Inspect") {
                 NavigationLink {
                     WebhooksView(config: config)
@@ -323,7 +349,9 @@ private struct SystemTab: View {
                 .scarfGoCompactListRow()
                 .listRowBackground(ScarfColor.backgroundSecondary)
             }
+            }
 
+            if !config.isServe {
             Section {
                 Toggle(isOn: $iCloudSyncEnabled) {
                     HStack(spacing: 10) {
@@ -384,6 +412,7 @@ private struct SystemTab: View {
                     .font(.caption)
             }
             .listRowBackground(ScarfColor.backgroundSecondary)
+            }
 
             Section {
                 Button {
@@ -448,7 +477,25 @@ private struct SystemTab: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Your SSH key and host settings for \(config.displayName) will be removed. Other servers stay configured. This cannot be undone.")
+            Text(config.isServe
+                 ? "Host details for \(config.displayName) will be removed. Other servers stay configured. This cannot be undone."
+                 : "Your SSH key and host settings for \(config.displayName) will be removed. Other servers stay configured. This cannot be undone.")
         }
+    }
+}
+
+struct ServeNeedsSSHPlaceholder: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: "lock.slash")
+        } description: {
+            Text(message)
+        }
+        .background(ScarfColor.backgroundPrimary)
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

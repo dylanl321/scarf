@@ -21,6 +21,7 @@ struct ScarfIOSApp: App {
         // to opt in. The Diagnostics → Performance row in Settings
         // flips this between off / signpost-only / full.
         ScarfMonBoot.configure(mode: ScarfMonBoot.currentMode())
+        HermesServeRuntime.credentials = KeychainHermesServeCredentialStore()
 
         // Wire ScarfCore's transport factory to produce Citadel-backed
         // `ServerTransport`s for every `.ssh` context. Without this,
@@ -133,7 +134,7 @@ final class RootModel {
         case loading
         case serverList
         case onboarding(forNewServer: ServerID)
-        case connected(ServerID, IOSServerConfig, SSHKeyBundle)
+        case connected(ServerID, IOSServerConfig, SSHKeyBundle?)
 
         static func == (lhs: State, rhs: State) -> Bool {
             switch (lhs, rhs) {
@@ -241,9 +242,14 @@ final class RootModel {
     /// or back to `.serverList` if we can't find it (defensive).
     func onboardingFinished(serverID: ServerID) async {
         servers = (try? await configStore.listAll()) ?? [:]
-        if let config = servers[serverID],
-           let key = try? await keyStore.load(for: serverID) {
-            state = .connected(serverID, config, key)
+        if let config = servers[serverID] {
+            if config.isServe {
+                state = .connected(serverID, config, nil)
+            } else if let key = try? await keyStore.load(for: serverID) {
+                state = .connected(serverID, config, key)
+            } else {
+                state = .serverList
+            }
         } else {
             state = .serverList
         }
@@ -258,7 +264,16 @@ final class RootModel {
                 diskConfig = try await configStore.load(id: id)
             }
             let diskKey: SSHKeyBundle? = try await keyStore.load(for: id)
-            guard let config = diskConfig, let key = diskKey else {
+            guard let config = diskConfig else {
+                state = .onboarding(forNewServer: id)
+                return
+            }
+            if config.isServe {
+                lastError = nil
+                state = .connected(id, config, nil)
+                return
+            }
+            guard let key = diskKey else {
                 // Genuine "no row" / "no key" — preserve the pre-A.3
                 // behaviour: re-onboard under this ID so the user keeps
                 // host/user/port and just regenerates the key.
@@ -309,6 +324,17 @@ final class RootModel {
         // don't hold a live session to a server we're forgetting.
         await CitadelTransportPool.shared.evict(id)
         var failures: [String] = []
+        do {
+            let store = KeychainHermesServeCredentialStore()
+            try await store.delete(for: id)
+            if let cfg = servers[id]?.toServerContext(id: id).serveConfig {
+                try await store.delete(fingerprint: cfg.fingerprint)
+            }
+        } catch {
+            Self.logger.error(
+                "RootModel.forget serve credential delete failed for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+        }
         do {
             try await keyStore.delete(for: id)
         } catch {

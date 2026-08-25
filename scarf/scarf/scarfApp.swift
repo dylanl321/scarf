@@ -27,6 +27,7 @@ struct ScarfApp: App {
         // having to opt in. Settings → Diagnostics → Performance
         // flips this between off / signpost-only / full.
         AppScarfMonBoot.configure(mode: ScarfMonBoot.currentMode())
+        HermesServeRuntime.credentials = KeychainHermesServeCredentialStore()
 
         // Point ScarfCore's analytics seam at this target's facade. The
         // package itself links no analytics SDK (it's shared verbatim with

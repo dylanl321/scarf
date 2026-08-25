@@ -14,13 +14,19 @@ import Observation
 public final class OnboardingViewModel {
     // MARK: - Public state
 
-    public private(set) var step: OnboardingStep = .serverDetails
+    public private(set) var step: OnboardingStep = .chooseConnection
 
     /// Input fields for the server-details screen.
     public var host: String = ""
     public var user: String = ""
     public var portText: String = ""
     public var displayName: String = ""
+
+    /// Hermes URL onboarding fields.
+    public var serveURL: String = ""
+    public var serveUsername: String = ""
+    public var servePassword: String = ""
+    public private(set) var connectionKind: OnboardingConnectionKind = .ssh
 
     /// What the user picks on the key-source screen.
     public private(set) var keyChoice: OnboardingKeyChoice?
@@ -48,11 +54,20 @@ public final class OnboardingViewModel {
     /// builds (`CitadelSSHService`) and in tests as a closure that
     /// returns a fixed bundle.
     public typealias KeyGenerator = @Sendable () async throws -> SSHKeyBundle
+    /// Probe + optional basic login. Tests inject a stub so Linux CI
+    /// never hits the network.
+    public typealias ServeProber = @Sendable (
+        _ config: HermesServeConfig,
+        _ username: String,
+        _ password: String
+    ) async throws -> HermesServeStatus
 
     private let keyStore: any SSHKeyStore
     private let configStore: any IOSServerConfigStore
     private let tester: any SSHConnectionTester
     private let keyGenerator: KeyGenerator
+    private let serveCredentials: any HermesServeCredentialStore
+    private let serveProber: ServeProber
     /// ServerID under which to save the key + config on completion.
     /// Single-server v1 left this nil and the stores fell back to the
     /// singleton APIs. M9 multi-server passes in a fresh ID from the
@@ -65,13 +80,26 @@ public final class OnboardingViewModel {
         configStore: any IOSServerConfigStore,
         tester: any SSHConnectionTester,
         keyGenerator: @escaping KeyGenerator,
-        targetServerID: ServerID? = nil
+        targetServerID: ServerID? = nil,
+        serveCredentials: any HermesServeCredentialStore = InMemoryHermesServeCredentialStore(),
+        serveProber: ServeProber? = nil
     ) {
         self.keyStore = keyStore
         self.configStore = configStore
         self.tester = tester
         self.keyGenerator = keyGenerator
         self.targetServerID = targetServerID
+        self.serveCredentials = serveCredentials
+        self.serveProber = serveProber ?? Self.defaultServeProber
+    }
+
+    private static let defaultServeProber: ServeProber = { config, username, password in
+        let client = HermesServeClient(config: config)
+        let status = try await client.probe()
+        if status.advertisedAuthMode == .basic {
+            try await client.loginBasic(username: username, password: password)
+        }
+        return status
     }
 
     // MARK: - Derived
@@ -80,7 +108,85 @@ public final class OnboardingViewModel {
         OnboardingLogic.validateServerDetails(host: host, portText: portText)
     }
 
+    public var serveDetailsValidation: OnboardingServerDetailsValidation {
+        OnboardingLogic.validateServeURL(serveURL)
+    }
+
     // MARK: - Transitions
+
+    public func pickSSH() {
+        connectionKind = .ssh
+        step = .serverDetails
+    }
+
+    public func pickHermesURL() {
+        connectionKind = .serve
+        step = .serveDetails
+    }
+
+    public func goBackToChooser() {
+        step = .chooseConnection
+        lastTestError = nil
+    }
+
+    /// Probe `GET /api/status` and, when the host requires it, basic login.
+    /// Saves config + password on success. No SSH key is generated.
+    public func testServeConnection() async {
+        guard serveDetailsValidation.canAdvance, !isWorking else { return }
+        isWorking = true
+        defer { isWorking = false }
+
+        let trimmedURL = serveURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedUser = serveUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDisplay: String = {
+            let d = displayName.trimmingCharacters(in: .whitespaces)
+            if !d.isEmpty { return d }
+            return URL(string: trimmedURL)?.host ?? trimmedURL
+        }()
+
+        var serveConfig = HermesServeConfig(baseURL: trimmedURL, authMode: .basic)
+        step = .testConnection
+        lastTestError = nil
+
+        do {
+            let status = try await serveProber(serveConfig, trimmedUser, servePassword)
+            serveConfig.authMode = status.advertisedAuthMode
+            let hostLabel = URL(string: trimmedURL)?.host ?? trimmedURL
+            let config = IOSServerConfig(
+                host: hostLabel,
+                user: trimmedUser.isEmpty ? nil : trimmedUser,
+                port: URL(string: trimmedURL)?.port,
+                hermesBinaryHint: nil,
+                remoteHome: nil,
+                displayName: trimmedDisplay,
+                serveBaseURL: trimmedURL,
+                serveProfile: nil,
+                serveAuthMode: serveConfig.authMode,
+                serveUsername: trimmedUser.isEmpty ? nil : trimmedUser
+            )
+            if let id = targetServerID {
+                try await configStore.save(config, id: id)
+                if serveConfig.authMode == .basic, !servePassword.isEmpty {
+                    try await serveCredentials.save(servePassword, for: id)
+                    try await serveCredentials.save(servePassword, fingerprint: serveConfig.fingerprint)
+                } else if serveConfig.authMode == .sessionToken, let token = status.session_token {
+                    try await serveCredentials.save(token, for: id)
+                    try await serveCredentials.save(token, fingerprint: serveConfig.fingerprint)
+                }
+            } else {
+                try await configStore.save(config)
+            }
+            let line = status.versionLineForCapabilities
+            if !line.isEmpty {
+                let ctx = config.toServerContext(id: targetServerID ?? ServerID())
+                HermesVersionCache.shared.remember(HermesCapabilities.parse(line), for: ctx)
+            }
+            step = .connected
+        } catch {
+            lastTestError = .other(error.localizedDescription)
+            step = .testFailed(reason: error.localizedDescription)
+        }
+    }
 
     public func advanceFromServerDetails() {
         guard serverDetailsValidation.canAdvance else { return }
@@ -168,6 +274,10 @@ public final class OnboardingViewModel {
     /// screen's "Retry" button, or from any other path that wants to
     /// bounce the connection without re-saving the key.
     public func runConnectionTest() async {
+        if connectionKind == .serve {
+            await testServeConnection()
+            return
+        }
         guard !isWorking else { return }
         isWorking = true
         defer { isWorking = false }
@@ -219,17 +329,21 @@ public final class OnboardingViewModel {
 
     /// Called from `.testFailed` when the user taps "Back".
     public func goBackToServerDetails() {
-        step = .serverDetails
+        step = (connectionKind == .serve) ? .serveDetails : .serverDetails
         lastTestError = nil
     }
 
     /// Reset all state — used by a "Start over" affordance.
     public func reset() async {
-        step = .serverDetails
+        step = .chooseConnection
+        connectionKind = .ssh
         host = ""
         user = ""
         portText = ""
         displayName = ""
+        serveURL = ""
+        serveUsername = ""
+        servePassword = ""
         importPEM = ""
         keyChoice = nil
         keyBundle = nil

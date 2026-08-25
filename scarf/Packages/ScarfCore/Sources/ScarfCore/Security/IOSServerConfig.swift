@@ -24,13 +24,26 @@ public struct IOSServerConfig: Sendable, Hashable, Codable {
     /// hostname but users can rename (e.g. "Home Server").
     public var displayName: String
 
+    /// When set, this row is a Hermes URL (`hermes serve`) connection
+    /// rather than SSH. Additive: old records omit these keys and keep
+    /// decoding as SSH.
+    public var serveBaseURL: String?
+    public var serveProfile: String?
+    public var serveAuthMode: HermesServeAuthMode?
+    /// Username for basic-auth login. Password lives in Keychain.
+    public var serveUsername: String?
+
     public init(
         host: String,
         user: String? = nil,
         port: Int? = nil,
         hermesBinaryHint: String? = nil,
         remoteHome: String? = nil,
-        displayName: String
+        displayName: String,
+        serveBaseURL: String? = nil,
+        serveProfile: String? = nil,
+        serveAuthMode: HermesServeAuthMode? = nil,
+        serveUsername: String? = nil
     ) {
         self.host = host
         self.user = user
@@ -38,6 +51,16 @@ public struct IOSServerConfig: Sendable, Hashable, Codable {
         self.hermesBinaryHint = hermesBinaryHint
         self.remoteHome = remoteHome
         self.displayName = displayName
+        self.serveBaseURL = serveBaseURL
+        self.serveProfile = serveProfile
+        self.serveAuthMode = serveAuthMode
+        self.serveUsername = serveUsername
+    }
+
+    /// `true` when this record points at `hermes serve` instead of SSH.
+    public var isServe: Bool {
+        guard let serveBaseURL else { return false }
+        return !serveBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Convenience bridge to the `ServerContext` that services across
@@ -52,6 +75,19 @@ public struct IOSServerConfig: Sendable, Hashable, Codable {
     /// the Citadel one, and the rest of the service layer continues
     /// unchanged.
     public func toServerContext(id: ServerID) -> ServerContext {
+        if isServe, let base = serveBaseURL {
+            let serve = HermesServeConfig(
+                baseURL: base,
+                profile: serveProfile,
+                authMode: serveAuthMode ?? .basic,
+                username: serveUsername
+            )
+            return ServerContext(
+                id: id,
+                displayName: displayName,
+                kind: .serve(serve)
+            )
+        }
         let ssh = SSHConfig(
             host: host,
             user: user,

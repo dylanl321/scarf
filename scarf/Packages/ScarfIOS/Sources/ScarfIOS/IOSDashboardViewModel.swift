@@ -62,6 +62,11 @@ public final class IOSDashboardViewModel {
         isLoading = true
         lastError = nil
 
+        if context.isServe {
+            await loadFromServe()
+            return
+        }
+
         let opened = await dataService.refresh()
         if !opened {
             lastError = await dataService.lastOpenError
@@ -104,6 +109,43 @@ public final class IOSDashboardViewModel {
         allProjects = bundle.projects
 
         await dataService.close()
+        isLoading = false
+    }
+
+    private func loadFromServe() async {
+        guard let cfg = context.serveConfig else {
+            lastError = HermesServeError.notAServeContext.errorDescription
+            isLoading = false
+            return
+        }
+        do {
+            let client = HermesServeClient(config: cfg)
+            try await client.authenticate(serverID: context.id, username: cfg.username)
+            let sessions = try await client.listSessions()
+            allSessions = Array(sessions.prefix(25))
+            recentSessions = Array(sessions.prefix(5))
+            var previews: [String: String] = [:]
+            for session in sessions {
+                if let preview = session.lastActivityDescription {
+                    previews[session.id] = preview
+                }
+            }
+            sessionPreviews = previews
+            stats = HermesDataService.SessionStats(
+                totalSessions: sessions.count,
+                totalMessages: sessions.reduce(0) { $0 + $1.messageCount },
+                totalToolCalls: sessions.reduce(0) { $0 + $1.toolCallCount },
+                totalInputTokens: sessions.reduce(0) { $0 + $1.inputTokens },
+                totalOutputTokens: sessions.reduce(0) { $0 + $1.outputTokens },
+                totalCostUSD: sessions.reduce(0) { $0 + ($1.estimatedCostUSD ?? 0) },
+                totalReasoningTokens: sessions.reduce(0) { $0 + $1.reasoningTokens },
+                totalActualCostUSD: sessions.reduce(0) { $0 + ($1.actualCostUSD ?? 0) }
+            )
+            sessionProjectNames = [:]
+            allProjects = []
+        } catch {
+            lastError = error.localizedDescription
+        }
         isLoading = false
     }
 

@@ -44,6 +44,9 @@ import Foundation
         #expect(local != ssh)
         if case .local = local { } else { Issue.record("expected .local") }
         if case .ssh(let cfg) = ssh { #expect(cfg.host == "h") } else { Issue.record("expected .ssh") }
+        let serve = ServerKind.serve(HermesServeConfig(baseURL: "http://h:9119"))
+        #expect(local != serve)
+        #expect(ssh != serve)
     }
 
     @Test func serverContextLocalIsStable() {

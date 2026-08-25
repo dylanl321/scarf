@@ -23,7 +23,7 @@ import PhotosUI
 /// voice — all deferred to M5+ polish.
 struct ChatView: View {
     let config: IOSServerConfig
-    let key: SSHKeyBundle
+    let key: SSHKeyBundle?
 
     @Environment(\.scarfGoCoordinator) private var coordinator
     @Environment(\.serverContext) private var envContext
@@ -100,7 +100,7 @@ struct ChatView: View {
     /// blocking access to the toolbar nav button on small phones.)
     @FocusState private var composerFocused: Bool
 
-    init(config: IOSServerConfig, key: SSHKeyBundle) {
+    init(config: IOSServerConfig, key: SSHKeyBundle?) {
         self.config = config
         self.key = key
         let ctx = config.toServerContext(id: Self.sharedContextID)
@@ -1200,6 +1200,7 @@ final class ChatController {
     /// `let` — set once at init, never mutated after.
     let context: ServerContext
     private var client: ACPClient?
+    private var serveGateway: TUIGatewayClient?
     private var eventTask: Task<Void, Never>?
     private var healthMonitorTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -1317,6 +1318,7 @@ final class ChatController {
     /// detached pushes the I/O off MainActor; the result and the
     /// `pendingStartIntent` / `modelPreflightReason` writes hop back.
     private func passModelPreflight(intent: PendingStart) async -> Bool {
+        if context.isServe { return true }
         let ctx = context
         // Direct read → `cat "$(hermes config path)"` wrapper fallback →
         // `hermes config show` model-line probe. The probe is the only
@@ -1524,6 +1526,10 @@ final class ChatController {
     /// `session/new` — so that by the time `state == .ready` the user
     /// can type and hit send immediately.
     func start() async {
+        if context.isServe {
+            await startServe()
+            return
+        }
         if state == .connecting || state == .ready { return }
         guard await passModelPreflight(intent: .fresh) else { return }
         state = .connecting
@@ -1595,7 +1601,13 @@ final class ChatController {
     }
 
     private func _sendImpl() async {
-        guard state == .ready, let client else { return }
+        guard state == .ready else { return }
+        if context.isServe {
+            guard serveGateway != nil else { return }
+        } else {
+            guard client != nil else { return }
+        }
+        let client = self.client
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         // v0.12+ allows image-only sends — vision models accept "describe
         // this" with no text. Bail only when both fields are empty.
@@ -1705,6 +1717,11 @@ final class ChatController {
         // literally. v2.5.
         let wireText = expandIfProjectScoped(text)
         do {
+            if context.isServe, let gw = serveGateway {
+                try await gw.submitPrompt(sessionID: sessionId, text: wireText)
+                return
+            }
+            guard let client else { return }
             let result = try await client.sendPrompt(
                 sessionId: sessionId,
                 text: wireText,
@@ -1741,7 +1758,11 @@ final class ChatController {
             // state didn't already fail. Always populate the error
             // banner so the user sees actionable detail regardless
             // of which path raised first (M7 #2).
-            await vm.recordACPFailure(error, client: client)
+            if let client {
+                await vm.recordACPFailure(error, client: client)
+            } else {
+                vm.acpError = error.localizedDescription
+            }
             if case .ready = state {
                 state = .failed("Prompt failed: \(error.localizedDescription)")
             }
@@ -1795,6 +1816,9 @@ final class ChatController {
         if let client {
             Task { await client.stop() }
         }
+        if let serveGateway {
+            Task { await serveGateway.close() }
+        }
     }
 
     /// Stop the current session + tear down the SSH exec channel.
@@ -1807,6 +1831,10 @@ final class ChatController {
             await client.stop()
         }
         client = nil
+        if let serveGateway {
+            await serveGateway.close()
+        }
+        serveGateway = nil
         state = .idle
         // Explicit user-initiated disconnect — clear the session
         // memory so reachability/scenePhase events don't try to
@@ -1898,6 +1926,21 @@ final class ChatController {
     /// EOF + health monitor + write failure) don't tear down the same
     /// client twice.
     private func handleConnectionDied() {
+        if context.isServe {
+            guard serveGateway != nil || lastActiveSessionID != nil, !isHandlingDisconnect else { return }
+            isHandlingDisconnect = true
+            vm.finalizeOnDisconnect()
+            eventTask?.cancel(); eventTask = nil
+            if let gw = serveGateway { Task { await gw.close() } }
+            serveGateway = nil
+            if let saved = lastActiveSessionID ?? vm.sessionId {
+                attemptReconnect(sessionId: saved)
+            } else {
+                state = .failed("Connection lost")
+                isHandlingDisconnect = false
+            }
+            return
+        }
         guard client != nil, !isHandlingDisconnect else { return }
         isHandlingDisconnect = true
         Self.logger.warning("ACP connection died")
@@ -1996,6 +2039,10 @@ final class ChatController {
             Task.detached { await dead.stop() }
         }
         client = nil
+        if let gw = serveGateway {
+            Task.detached { await gw.close() }
+        }
+        serveGateway = nil
         // The next `.active` cycle will route through
         // verifyAndResume → attemptReconnect (which now handles a
         // nil client directly — previously handleConnectionDied
@@ -2028,6 +2075,10 @@ final class ChatController {
     /// became a silent no-op) or `.failed` if a prompt was mid-flight
     /// when the user switched apps (gh#108 — "Chat connection failed").
     private func verifyAndResume(sessionId: String) async {
+        if context.isServe {
+            attemptReconnect(sessionId: sessionId)
+            return
+        }
         if let client {
             if await client.isHealthy {
                 if case .reconnecting = state { state = .ready }
@@ -2085,6 +2136,10 @@ final class ChatController {
         reconnectTask?.cancel()
         reconnectTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            if context.isServe {
+                await reconnectServe(sessionId: sessionId)
+                return
+            }
 
             for attempt in 1...Self.maxReconnectAttempts {
                 guard !Task.isCancelled else { return }
@@ -2271,6 +2326,10 @@ final class ChatController {
         projectPath: String?,
         projectName: String?
     ) async {
+        if context.isServe {
+            await startServe(projectPath: projectPath, projectName: projectName)
+            return
+        }
         if state == .connecting || state == .ready { return }
         let intent: PendingStart
         if let projectPath, let projectName {
@@ -2484,9 +2543,89 @@ final class ChatController {
     /// Dispatch the user's answer to a pending permission request.
     /// Called by `PermissionSheet`.
     func respondToPermission(requestId: Int, optionId: String) async {
+        if context.isServe, let gw = serveGateway {
+            try? await gw.respondApproval(requestID: requestId, optionID: optionId)
+            vm.pendingPermission = nil
+            return
+        }
         guard let client else { return }
         await client.respondToPermission(requestId: requestId, optionId: optionId)
         vm.pendingPermission = nil
+    }
+
+    private func reconnectServe(sessionId: String) async {
+        defer { isHandlingDisconnect = false }
+        for attempt in 1...Self.maxReconnectAttempts {
+            guard !Task.isCancelled else { return }
+            state = .reconnecting(attempt: attempt, of: Self.maxReconnectAttempts)
+            if attempt > 1 {
+                let delay = min(
+                    Self.reconnectBaseDelay * UInt64(1 << (attempt - 1)),
+                    Self.maxReconnectDelay
+                )
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled else { return }
+            }
+            do {
+                guard let cfg = context.serveConfig else { throw HermesServeError.notAServeContext }
+                let http = HermesServeClient(config: cfg)
+                try await http.authenticate(serverID: context.id, username: cfg.username)
+                let wsURL = try await http.websocketURL()
+                let gw = TUIGatewayClient(url: wsURL)
+                try await gw.connect()
+                serveGateway = gw
+                startServeEventLoop(gateway: gw)
+                vm.setSessionId(sessionId)
+                lastActiveSessionID = sessionId
+                state = .ready
+                return
+            } catch {
+                if attempt == Self.maxReconnectAttempts {
+                    state = .failed(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func startServe(projectPath: String? = nil, projectName: String? = nil) async {
+        if state == .connecting || state == .ready { return }
+        state = .connecting
+        vm.reset()
+        guard let cfg = context.serveConfig else {
+            state = .failed(HermesServeError.notAServeContext.errorDescription ?? "Not a Hermes URL server.")
+            return
+        }
+        do {
+            let http = HermesServeClient(config: cfg)
+            try await http.authenticate(serverID: context.id, username: cfg.username)
+            let wsURL = try await http.websocketURL()
+            let gw = TUIGatewayClient(url: wsURL)
+            try await gw.connect()
+            serveGateway = gw
+            startServeEventLoop(gateway: gw)
+            let sessionId = try await gw.createSession()
+            vm.setSessionId(sessionId)
+            loadDraft()
+            state = .ready
+            lastActiveSessionID = sessionId
+            lastProjectPath = projectPath
+            currentProjectName = projectName
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    private func startServeEventLoop(gateway: TUIGatewayClient) {
+        eventTask = Task { @MainActor [weak self] in
+            let stream = await gateway.events
+            for await event in stream {
+                guard !Task.isCancelled else { break }
+                self?.vm.handleACPEvent(event)
+            }
+            if !Task.isCancelled {
+                self?.handleConnectionDied()
+            }
+        }
     }
 }
 
@@ -3093,7 +3232,7 @@ private struct IOSModelPreflightSheet: View {
 #if !canImport(SQLite3)
 struct ChatView: View {
     let config: IOSServerConfig
-    let key: SSHKeyBundle
+    let key: SSHKeyBundle?
     var body: some View {
         Text("Chat requires SQLite3 — this platform is not supported.")
     }

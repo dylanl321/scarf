@@ -111,26 +111,26 @@ final class ServerRegistry {
 
     @discardableResult
     func addServer(displayName: String, config: SSHConfig) -> ServerEntry {
+        addServer(displayName: displayName, kind: .ssh(config))
+    }
+
+    @discardableResult
+    func addServer(displayName: String, kind: ServerKind) -> ServerEntry {
         let entry = ServerEntry(
             id: ServerID(),
             displayName: displayName,
-            kind: .ssh(config)
+            kind: kind
         )
         entries.append(entry)
         save()
         onEntriesChanged?()
-        // Registry-level so every add path (Manage Servers, and anything
-        // added later) is covered exactly once. `transport` is the only
-        // prop: nothing about the host, user, port, or identity file is
-        // safe to send, and every entry this method creates is `.ssh` by
-        // construction — Local is implicit and never "added".
-        //
-        // The taxonomy's `key_source` prop is deliberately absent here: it
-        // describes the iOS onboarding flow's generate/import-key choice,
-        // which has no macOS analogue (the Mac defers entirely to
-        // ssh-agent or an existing on-disk identity file). Emitting a
-        // fabricated value would be worse than omitting the prop.
-        Analytics.record("server_added", props: ["transport": "ssh"])
+        let transport: String
+        switch kind {
+        case .local: transport = "local"
+        case .ssh: transport = "ssh"
+        case .serve: transport = "serve"
+        }
+        Analytics.record("server_added", props: ["transport": transport])
         return entry
     }
 
@@ -156,7 +156,11 @@ final class ServerRegistry {
         // a no-op removal is not a user-visible event.
         if let removed {
             let transport: String
-            if case .local = removed.kind { transport = "local" } else { transport = "ssh" }
+            switch removed.kind {
+            case .local: transport = "local"
+            case .ssh: transport = "ssh"
+            case .serve: transport = "serve"
+            }
             Analytics.record("server_removed", props: ["transport": transport])
         }
 

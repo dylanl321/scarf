@@ -9,7 +9,7 @@ import ScarfDesign
 /// renders against the rust page background.
 struct DashboardView: View {
     let config: IOSServerConfig
-    let key: SSHKeyBundle
+    let key: SSHKeyBundle?
     /// Soft-disconnect closure threaded down from the connected-server
     /// host. Surfaced in the nav bar as a "Switch server" button so
     /// users can hop back to the server list without first navigating
@@ -30,7 +30,7 @@ struct DashboardView: View {
 
     init(
         config: IOSServerConfig,
-        key: SSHKeyBundle,
+        key: SSHKeyBundle?,
         onSoftDisconnect: (@MainActor () async -> Void)? = nil
     ) {
         self.config = config
