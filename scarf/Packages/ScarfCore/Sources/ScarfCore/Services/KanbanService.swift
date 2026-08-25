@@ -3,8 +3,9 @@ import Foundation
 import os
 #endif
 
-/// Async, transport-aware client for `hermes kanban …`. Wraps every CLI
-/// verb the v0.12 board exposes in a typed Swift surface.
+/// Async, transport-aware client for `hermes kanban …`. SSH/local hosts
+/// use the CLI; Hermes URL connections read the same SQLite board via
+/// `/api/plugins/kanban/` (writes still go through the CLI / dashboard).
 ///
 /// **Concurrency.** This is a pure-I/O `actor` — no UI state. View models
 /// (`@MainActor` `@Observable`) hold a service reference and `await`
@@ -54,6 +55,9 @@ public actor KanbanService {
     // MARK: - Reads
 
     public func list(_ filter: KanbanListFilter = .all) async throws -> [HermesKanbanTask] {
+        if context.isServe {
+            return try await listFromServe(filter)
+        }
         var args = prefix("list")
         args.append(contentsOf: filter.argv())
         let (code, stdout, stderr) = await runHermes(args: args, timeout: 20)
@@ -75,6 +79,11 @@ public actor KanbanService {
     }
 
     public func show(taskId: String) async throws -> HermesKanbanTaskDetail {
+        if context.isServe {
+            return try await withServe("show") { client in
+                try await client.kanbanTaskDetail(taskId: taskId, board: board)
+            }
+        }
         let args = prefix("show", taskId, "--json")
         let (code, stdout, stderr) = await runHermes(args: args, timeout: 15)
         try ensureSuccess(code: code, stdout: stdout, stderr: stderr, verb: "show")
@@ -89,6 +98,11 @@ public actor KanbanService {
     }
 
     public func runs(taskId: String) async throws -> [HermesKanbanRun] {
+        if context.isServe {
+            return try await withServe("runs") { client in
+                try await client.kanbanTaskRuns(taskId: taskId, board: board)
+            }
+        }
         let args = prefix("runs", taskId, "--json")
         let (code, stdout, stderr) = await runHermes(args: args, timeout: 15)
         try ensureSuccess(code: code, stdout: stdout, stderr: stderr, verb: "runs")
@@ -108,6 +122,11 @@ public actor KanbanService {
     }
 
     public func stats() async throws -> HermesKanbanStats {
+        if context.isServe {
+            return try await withServe("stats") { client in
+                try await client.kanbanStats(board: board)
+            }
+        }
         let args = prefix("stats", "--json")
         let (code, stdout, stderr) = await runHermes(args: args, timeout: 15)
         try ensureSuccess(code: code, stdout: stdout, stderr: stderr, verb: "stats")
@@ -127,6 +146,11 @@ public actor KanbanService {
     /// the task has never been claimed). Pass `tailBytes` to cap the
     /// returned size (useful when polling at high cadence).
     public func log(taskId: String, tailBytes: Int? = nil) async throws -> String {
+        if context.isServe {
+            return try await withServe("log") { client in
+                try await client.kanbanTaskLog(taskId: taskId, tailBytes: tailBytes, board: board)
+            }
+        }
         var args = prefix("log")
         if let tailBytes {
             args.append(contentsOf: ["--tail", String(tailBytes)])
@@ -150,6 +174,11 @@ public actor KanbanService {
     }
 
     public func assignees() async throws -> [HermesKanbanAssignee] {
+        if context.isServe {
+            return try await withServe("assignees") { client in
+                try await client.kanbanAssignees(board: board)
+            }
+        }
         // The `assignees` verb doesn't take `--json` consistently across
         // 0.12.x — pass it anyway and fall back to a tab-delimited parse
         // if Hermes printed a human table.
@@ -166,6 +195,65 @@ public actor KanbanService {
         //   "<profile>\t<active>\t<total>"
         // OR "<profile>     <active>     <total>" (whitespace separated).
         return parseAssigneeTable(stdout)
+    }
+
+    private func listFromServe(_ filter: KanbanListFilter) async throws -> [HermesKanbanTask] {
+        let tasks = try await withServe("list") { client in
+            try await client.listKanbanTasks(
+                tenant: filter.tenant,
+                includeArchived: filter.includeArchived,
+                board: board
+            )
+        }
+        return Self.apply(filter, to: tasks, mineProfile: context.serveConfig?.profile)
+    }
+
+    private func withServe<T>(
+        _ verb: String,
+        _ body: (HermesServeClient) async throws -> T
+    ) async throws -> T {
+        do {
+            let client = try await HermesServeClient.authenticated(context: context)
+            return try await body(client)
+        } catch let error as KanbanError {
+            throw error
+        } catch let error as HermesServeError {
+            throw Self.mapServe(error, verb: verb)
+        } catch {
+            throw KanbanError.nonZeroExit(code: -1, stderr: error.localizedDescription)
+        }
+    }
+
+    private static func mapServe(_ error: HermesServeError, verb: String) -> KanbanError {
+        if case .httpStatus(404, _) = error {
+            return .notSupported(
+                verb: verb,
+                reason: "the Kanban dashboard plugin isn't available on this Hermes."
+            )
+        }
+        return .nonZeroExit(code: -1, stderr: error.errorDescription ?? "Hermes URL request failed")
+    }
+
+    /// Client-side leftovers the board GET doesn't accept as query params.
+    private static func apply(
+        _ filter: KanbanListFilter,
+        to tasks: [HermesKanbanTask],
+        mineProfile: String?
+    ) -> [HermesKanbanTask] {
+        var rows = tasks
+        if let status = filter.status, status != .unknown {
+            rows = rows.filter { KanbanStatus.from($0.status) == status }
+        }
+        if let assignee = filter.assignee, !assignee.isEmpty {
+            rows = rows.filter { $0.assignee == assignee }
+        }
+        if let session = filter.session, !session.isEmpty {
+            rows = rows.filter { $0.sessionId == session }
+        }
+        if filter.mineOnly, let mineProfile, !mineProfile.isEmpty {
+            rows = rows.filter { $0.assignee == mineProfile }
+        }
+        return rows
     }
 
     private nonisolated func parseAssigneeTable(_ text: String) -> [HermesKanbanAssignee] {
@@ -571,6 +659,13 @@ public actor KanbanService {
         timeout: TimeInterval
     ) async -> (exitCode: Int32, stdout: String, stderr: String) {
         let context = self.context
+        if context.isServe {
+            return (
+                -1,
+                "",
+                "Kanban writes over a Hermes URL aren't in ScarfGo yet. Use the Hermes dashboard or an SSH connection."
+            )
+        }
         return await Task.detached(priority: .utility) { () -> (Int32, String, String) in
             let transport = context.makeTransport()
             let executable = context.paths.hermesBinary

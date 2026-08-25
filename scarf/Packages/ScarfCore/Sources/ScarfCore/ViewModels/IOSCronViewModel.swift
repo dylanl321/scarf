@@ -262,8 +262,7 @@ public final class IOSCronViewModel {
     @discardableResult
     public func upsert(_ job: HermesCronJob) async -> Bool {
         if context.isServe {
-            lastError = "Adding or editing cron jobs over a Hermes URL is not supported yet. Pause, resume, or delete here — or connect over SSH to create jobs."
-            return false
+            return await upsertOnServe(job)
         }
         var updated = jobs
         if let idx = updated.firstIndex(where: { $0.id == job.id }) {
@@ -349,6 +348,34 @@ public final class IOSCronViewModel {
             jobs = []
         }
         isLoading = false
+    }
+
+    private func upsertOnServe(_ job: HermesCronJob) async -> Bool {
+        guard let cfg = context.serveConfig else {
+            lastError = HermesServeError.notAServeContext.errorDescription
+            return false
+        }
+        lastError = nil
+        if jobs.contains(where: { $0.name == job.name || $0.id == job.id }) {
+            return true
+        }
+        do {
+            let client = HermesServeClient(config: cfg)
+            try await client.authenticate(serverID: context.id, username: cfg.username)
+            let expression = job.schedule.expression ?? job.schedule.display ?? ""
+            _ = try await client.createCronJob(
+                name: job.name,
+                prompt: job.prompt,
+                schedule: expression,
+                deliver: job.deliver ?? "local",
+                enabled: job.enabled
+            )
+            await load()
+            return lastError == nil
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
     }
 
     private func toggleOnServe(id: String, enabled: Bool) async -> Bool {

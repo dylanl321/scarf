@@ -1,6 +1,7 @@
 import Foundation
 import MetricKit
 import os
+import ScarfCore
 
 /// MetricKit subscriber that persists crash + hang diagnostic payloads
 /// to the app's Documents directory so the user can share them on the
@@ -132,6 +133,12 @@ final class MetricKitSubscriber: NSObject, MXMetricManagerSubscriber, @unchecked
                 "Persisted \(kind, privacy: .public) diagnostic (\(json.count) bytes) to \(url.lastPathComponent, privacy: .public)"
             )
             prune(in: dir)
+            ScarfGoDebug.record(
+                kind: hangCount > 0 ? .hang : .error,
+                code: kind,
+                message: "MetricKit \(kind) (\(crashCount) crash, \(hangCount) hang)",
+                config: nil
+            )
         } catch {
             logger.error(
                 "Failed to persist diagnostic: \(error.localizedDescription, privacy: .public)"

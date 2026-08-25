@@ -27,6 +27,9 @@ public final class OnboardingViewModel {
     public var serveUsername: String = ""
     public var servePassword: String = ""
     public private(set) var connectionKind: OnboardingConnectionKind = .ssh
+    /// True while the user is attaching companion SSH to an existing
+    /// Hermes URL row (onboarding offer or later System-tab attach).
+    public private(set) var attachingCompanion: Bool = false
 
     /// What the user picks on the key-source screen.
     public private(set) var keyChoice: OnboardingKeyChoice?
@@ -181,11 +184,57 @@ public final class OnboardingViewModel {
                 let ctx = config.toServerContext(id: targetServerID ?? ServerID())
                 HermesVersionCache.shared.remember(HermesCapabilities.parse(line), for: ctx)
             }
-            step = .connected
+            step = .companionSSHOffer
         } catch {
             lastTestError = .other(error.localizedDescription)
             step = .testFailed(reason: error.localizedDescription)
         }
+    }
+
+    /// Skip companion SSH and finish Hermes URL onboarding.
+    public func skipCompanionSSH() {
+        attachingCompanion = false
+        step = .connected
+    }
+
+    /// Leave the SSH-key flow without attaching companion SSH.
+    public func cancelCompanionSSH() {
+        attachingCompanion = false
+        step = .companionSSHOffer
+    }
+
+    /// Continue into the existing SSH key flow, keeping the serve row.
+    public func startCompanionSSH() {
+        attachingCompanion = true
+        connectionKind = .serve
+        if host.trimmingCharacters(in: .whitespaces).isEmpty {
+            if let url = URL(string: serveURL.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                host = url.host ?? ""
+                if portText.isEmpty, let port = url.port {
+                    portText = String(port == 9119 ? 22 : port)
+                }
+            }
+        }
+        if user.isEmpty {
+            user = serveUsername
+        }
+        if portText.isEmpty {
+            portText = "22"
+        }
+        step = .serverDetails
+    }
+
+    /// Re-enter the SSH key flow to attach companion SSH to a saved row.
+    public func startAttachingCompanion(to config: IOSServerConfig) {
+        connectionKind = .serve
+        attachingCompanion = true
+        serveURL = config.serveBaseURL ?? ""
+        serveUsername = config.serveUsername ?? ""
+        displayName = config.displayName
+        host = config.companionHost ?? URL(string: config.serveBaseURL ?? "")?.host ?? config.host
+        user = config.companionUser ?? config.serveUsername ?? config.user ?? ""
+        portText = String(config.companionPort ?? 22)
+        step = .serverDetails
     }
 
     public func advanceFromServerDetails() {
@@ -274,7 +323,7 @@ public final class OnboardingViewModel {
     /// screen's "Retry" button, or from any other path that wants to
     /// bounce the connection without re-saving the key.
     public func runConnectionTest() async {
-        if connectionKind == .serve {
+        if connectionKind == .serve && !attachingCompanion {
             await testServeConnection()
             return
         }
@@ -298,20 +347,37 @@ public final class OnboardingViewModel {
         }()
         let port: Int? = Int(portText.trimmingCharacters(in: .whitespaces))
 
-        let config = IOSServerConfig(
-            host: trimmedHost,
-            user: trimmedUser.isEmpty ? nil : trimmedUser,
-            port: port,
-            hermesBinaryHint: nil,
-            remoteHome: nil,
-            displayName: trimmedDisplayName
-        )
+        let config: IOSServerConfig
+        if attachingCompanion {
+            var existing: IOSServerConfig
+            if let id = targetServerID, let loaded = try? await configStore.load(id: id) {
+                existing = loaded
+            } else if let loaded = try? await configStore.load() {
+                existing = loaded
+            } else {
+                existing = IOSServerConfig(host: trimmedHost, displayName: trimmedDisplayName)
+            }
+            existing.companionHost = trimmedHost
+            existing.companionUser = trimmedUser.isEmpty ? nil : trimmedUser
+            existing.companionPort = port
+            config = existing
+        } else {
+            config = IOSServerConfig(
+                host: trimmedHost,
+                user: trimmedUser.isEmpty ? nil : trimmedUser,
+                port: port,
+                hermesBinaryHint: nil,
+                remoteHome: nil,
+                displayName: trimmedDisplayName
+            )
+        }
 
         step = .testConnection
         lastTestError = nil
 
         do {
-            try await tester.testConnection(config: config, key: bundle)
+            let probe = config.companionSSHConfig() ?? config
+            try await tester.testConnection(config: probe, key: bundle)
             if let id = targetServerID {
                 try await configStore.save(config, id: id)
             } else {
@@ -329,7 +395,11 @@ public final class OnboardingViewModel {
 
     /// Called from `.testFailed` when the user taps "Back".
     public func goBackToServerDetails() {
-        step = (connectionKind == .serve) ? .serveDetails : .serverDetails
+        if attachingCompanion {
+            step = .serverDetails
+        } else {
+            step = (connectionKind == .serve) ? .serveDetails : .serverDetails
+        }
         lastTestError = nil
     }
 
@@ -344,6 +414,7 @@ public final class OnboardingViewModel {
         serveURL = ""
         serveUsername = ""
         servePassword = ""
+        attachingCompanion = false
         importPEM = ""
         keyChoice = nil
         keyBundle = nil

@@ -1118,6 +1118,14 @@ struct ChatView: View {
             }
             .buttonStyle(ScarfPrimaryButton())
         }
+        .onAppear {
+            ScarfGoDebug.record(
+                kind: .chatFail,
+                code: "chat-connection",
+                message: message,
+                config: config
+            )
+        }
         .padding()
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 14))

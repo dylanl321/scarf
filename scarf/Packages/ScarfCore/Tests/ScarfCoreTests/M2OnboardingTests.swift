@@ -423,6 +423,8 @@ import Foundation
         vm.servePassword = "secret"
         vm.displayName = "Pi"
         await vm.testServeConnection()
+        #expect(vm.step == .companionSSHOffer)
+        vm.skipCompanionSSH()
         #expect(vm.step == .connected)
         let saved = try! await cs.load(id: id)
         #expect(saved?.isServe == true)
@@ -430,5 +432,47 @@ import Foundation
         #expect(saved?.serveUsername == "alan")
         #expect(try! await ks.load(for: id) == nil)
         #expect(try! await creds.load(for: id) == "secret")
+    }
+
+    @Test @MainActor func serveOnboardingCompanionSSHMergesIntoServeRow() async {
+        let ks = InMemorySSHKeyStore()
+        let cs = InMemoryIOSServerConfigStore()
+        let tester = MockSSHConnectionTester(behavior: .success)
+        let creds = InMemoryHermesServeCredentialStore()
+        let id = ServerID()
+        let vm = OnboardingViewModel(
+            keyStore: ks,
+            configStore: cs,
+            tester: tester,
+            keyGenerator: {
+                SSHKeyBundle(
+                    privateKeyPEM: "p",
+                    publicKeyOpenSSH: "ssh-ed25519 x n",
+                    comment: "n",
+                    createdAt: ""
+                )
+            },
+            targetServerID: id,
+            serveCredentials: creds,
+            serveProber: { _, _, _ in
+                HermesServeStatus(version: "v0.20.4", auth_required: false, session_token: "t")
+            }
+        )
+        vm.pickHermesURL()
+        vm.serveURL = "http://192.168.1.10:9119"
+        vm.serveUsername = "alan"
+        await vm.testServeConnection()
+        vm.startCompanionSSH()
+        #expect(vm.step == .serverDetails)
+        #expect(vm.host == "192.168.1.10")
+        vm.portText = "22"
+        await vm.generateKey()
+        await vm.confirmPublicKeyAdded()
+        #expect(vm.step == .connected)
+        let saved = try! await cs.load(id: id)
+        #expect(saved?.isServe == true)
+        #expect(saved?.hasCompanionSSH == true)
+        #expect(saved?.companionHost == "192.168.1.10")
+        #expect(try! await ks.load(for: id) != nil)
     }
 }

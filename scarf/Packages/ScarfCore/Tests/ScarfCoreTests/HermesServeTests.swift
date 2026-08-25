@@ -78,6 +78,53 @@ import Foundation
         #expect(ctx.serveConfig?.baseURL == "http://192.168.1.10:9119")
     }
 
+    @Test func companionSSHDoesNotChangeServeKind() {
+        let cfg = IOSServerConfig(
+            host: "192.168.1.10",
+            displayName: "Pi",
+            serveBaseURL: "http://192.168.1.10:9119",
+            serveAuthMode: .basic,
+            companionHost: "192.168.1.10",
+            companionUser: "alan",
+            companionPort: 22
+        )
+        #expect(cfg.isServe)
+        #expect(cfg.hasCompanionSSH)
+        #expect(cfg.toServerContext(id: ServerID()).isServe)
+        let ssh = cfg.toSSHCompanionContext(id: ServerID())
+        #expect(ssh?.isServe == false)
+        if case .ssh(let c) = ssh?.kind {
+            #expect(c.host == "192.168.1.10")
+            #expect(c.user == "alan")
+            #expect(c.port == 22)
+        } else {
+            Issue.record("expected companion .ssh")
+        }
+    }
+
+    @Test func debugRedactorStripsSecretKeysAndClamps() {
+        let obj: [String: Any] = [
+            "message": "hello",
+            "password": "secret",
+            "nested": ["token": "abc", "ok": "yes"],
+        ]
+        let stripped = ScarfGoDebugRedactor.stripSecretKeys(from: obj)
+        #expect(stripped["password"] == nil)
+        #expect(stripped["message"] as? String == "hello")
+        let nested = stripped["nested"] as? [String: Any]
+        #expect(nested?["token"] == nil)
+        #expect(nested?["ok"] as? String == "yes")
+        let long = String(repeating: "x", count: 500)
+        #expect(ScarfGoDebugRedactor.redact(message: long).count < 420)
+        let hybrid = IOSServerConfig(
+            host: "h",
+            displayName: "h",
+            serveBaseURL: "http://h:9119",
+            companionHost: "h"
+        )
+        #expect(ScarfGoDebugRedactor.connectionLabel(for: hybrid) == "hybrid")
+    }
+
     @Test func validateServeURL() {
         #expect(OnboardingLogic.validateServeURL("http://192.168.1.10:9119").canAdvance)
         #expect(OnboardingLogic.validateServeURL("https://hermes.example.com").canAdvance)
@@ -236,6 +283,171 @@ import Foundation
         #expect(rows.count == 1)
         #expect(rows[0].id == "s1")
         #expect(rows[0].title == "T")
+    }
+
+    @Test func serveClientPagesSessionsWithLimitOffsetAndTotal() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            #expect(request.url?.path == "/api/sessions")
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            #expect(items.contains(where: { $0.name == "limit" && $0.value == "100" }))
+            #expect(items.contains(where: { $0.name == "offset" && $0.value == "100" }))
+            #expect(items.contains(where: { $0.name == "order" && $0.value == "recent" }))
+            let body = #"{"sessions":[{"id":"s2","title":"Next"}],"total":140,"limit":100,"offset":100}"#
+            return (200, Data(body.utf8))
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let page = try await client.listSessionPage(limit: 100, offset: 100)
+        #expect(page.sessions.count == 1)
+        #expect(page.sessions[0].id == "s2")
+        #expect(page.total == 140)
+        #expect(page.hasMore)
+    }
+
+    @Test func serveClientFlattensKanbanBoardColumns() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            #expect(request.url?.path == "/api/plugins/kanban/board")
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            #expect(items.contains(where: { $0.name == "tenant" && $0.value == "scarf:demo" }))
+            let body = """
+            {"columns":[
+              {"name":"todo","tasks":[
+                {"id":"t1","title":"First","status":"todo","priority":40,"skills":null}
+              ]},
+              {"name":"running","tasks":[
+                {"id":"t2","title":"Second","status":"running","assignee":"coder","skills":["debug"]}
+              ]}
+            ],"tenants":["scarf:demo"],"assignees":["coder"],"latest_event_id":3,"now":1710000000}
+            """
+            return (200, Data(body.utf8))
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let tasks = try await client.listKanbanTasks(tenant: "scarf:demo")
+        #expect(tasks.count == 2)
+        #expect(tasks[0].id == "t1")
+        #expect(tasks[0].skills.isEmpty)
+        #expect(tasks[1].assignee == "coder")
+        #expect(tasks[1].skills == ["debug"])
+    }
+
+    @Test func serveClientDecodesKanbanTaskDetailAndStats() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            switch request.url?.path {
+            case "/api/plugins/kanban/tasks/t1":
+                let body = """
+                {"task":{"id":"t1","title":"First","status":"todo","body":"full"},
+                 "comments":[{"id":1,"task_id":"t1","author":"alan","body":"hi","created_at":1710000000}],
+                 "events":[],"runs":[{"id":9,"task_id":"t1","status":"done","started_at":1710000000}]}
+                """
+                return (200, Data(body.utf8))
+            case "/api/plugins/kanban/stats":
+                let body = #"{"by_status":{"todo":2,"running":1},"by_assignee":{"coder":{"todo":1}},"oldest_ready_age_seconds":12}"#
+                return (200, Data(body.utf8))
+            case "/api/plugins/kanban/assignees":
+                let body = #"{"assignees":[{"name":"coder","on_disk":true,"counts":{"todo":1,"running":2}}]}"#
+                return (200, Data(body.utf8))
+            default:
+                return (404, Data())
+            }
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let detail = try await client.kanbanTaskDetail(taskId: "t1")
+        #expect(detail.task.title == "First")
+        #expect(detail.comments.count == 1)
+        let runs = try await client.kanbanTaskRuns(taskId: "t1")
+        #expect(runs.count == 1)
+        #expect(runs[0].id == 9)
+        let stats = try await client.kanbanStats()
+        #expect(stats.byStatus["todo"] == 2)
+        #expect(stats.oldestReadyAgeSeconds == 12)
+        let assignees = try await client.kanbanAssignees()
+        #expect(assignees.count == 1)
+        #expect(assignees[0].profile == "coder")
+        #expect(assignees[0].totalCount == 3)
+    }
+
+    @Test func serveClientListsWebhooksAndProfiles() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            switch request.url?.path {
+            case "/api/webhooks":
+                let body = """
+                {"enabled":true,"base_url":"http://h:9119",
+                 "subscriptions":[{"name":"github","description":"PRs","deliver":"log","events":["push"],"url":"http://h:9119/webhooks/github"}]}
+                """
+                return (200, Data(body.utf8))
+            case "/api/profiles":
+                return (200, Data(#"{"profiles":[{"name":"default","is_default":true},{"name":"coder"}]}"#.utf8))
+            case "/api/profiles/active":
+                return (200, Data(#"{"active":"coder","current":"default"}"#.utf8))
+            default:
+                return (404, Data())
+            }
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let hooks = try await client.listWebhooks()
+        #expect(hooks.enabled == true)
+        #expect(hooks.subscriptions?.first?.name == "github")
+        let profiles = try await client.listProfiles()
+        #expect(profiles.compactMap(\.name) == ["default", "coder"])
+        let active = try await client.fetchActiveProfile()
+        #expect(active.active == "coder")
+    }
+
+    @Test func serveClientCreatesCronJob() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            #expect(request.url?.path == "/api/cron/jobs")
+            #expect(request.httpMethod == "POST")
+            let body = ServeURLProtocol.bodyString(of: request)
+            #expect(body.contains("ScarfGo debug review"))
+            #expect(body.contains("local"))
+            return (200, Data(#"{"id":"job1","name":"ScarfGo debug review"}"#.utf8))
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let data = try await client.createCronJob(
+            name: "ScarfGo debug review",
+            prompt: "summarize",
+            schedule: "0 9 * * *",
+            deliver: "local"
+        )
+        #expect(!data.isEmpty)
+    }
+
+    @Test func serveClientCreatesWebhook() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            #expect(request.url?.path == "/api/webhooks")
+            #expect(request.httpMethod == "POST")
+            return (200, Data(#"{"name":"scarfgo-debug","deliver":"log","secret":"abc"}"#.utf8))
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let dto = try await client.createWebhook(
+            name: "scarfgo-debug",
+            script: "~/.hermes/scripts/scarfgo_debug_sink.py",
+            deliver: "log",
+            secret: "abc"
+        )
+        #expect(dto.name == "scarfgo-debug")
+        #expect(dto.secret == "abc")
+    }
+
+    @Test func serveHTTP404CopyIsNotLoginSpecific() {
+        #expect(HermesServeError.httpStatus(404, "").errorDescription?.contains("login") != true)
     }
 
     @Test func hasHermesServeGatesOn018() {

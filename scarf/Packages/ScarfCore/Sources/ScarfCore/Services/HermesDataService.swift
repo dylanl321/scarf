@@ -373,14 +373,37 @@ public actor HermesDataService {
 
     // MARK: - Session Queries
 
-    public func fetchSessions(limit: Int = QueryDefaults.sessionLimit) async -> [HermesSession] {
-        let sql = "SELECT \(sessionListColumns) FROM \(sessionListFrom) WHERE \(sessionListPredicate) ORDER BY started_at DESC LIMIT ?"
+    public func fetchSessions(
+        limit: Int = QueryDefaults.sessionLimit,
+        offset: Int = 0
+    ) async -> [HermesSession] {
+        let sql: String
+        let params: [SQLValue]
+        if offset > 0 {
+            sql = "SELECT \(sessionListColumns) FROM \(sessionListFrom) WHERE \(sessionListPredicate) ORDER BY started_at DESC LIMIT ? OFFSET ?"
+            params = [.integer(Int64(limit)), .integer(Int64(offset))]
+        } else {
+            sql = "SELECT \(sessionListColumns) FROM \(sessionListFrom) WHERE \(sessionListPredicate) ORDER BY started_at DESC LIMIT ?"
+            params = [.integer(Int64(limit))]
+        }
         do {
-            let rows = try await backend.query(sql, params: [.integer(Int64(limit))])
+            let rows = try await backend.query(sql, params: params)
             return rows.map { sessionFromRow($0) }
         } catch {
             Self.logger.warning("fetchSessions failed: \(error.localizedDescription, privacy: .public)")
             return []
+        }
+    }
+
+    /// Count of listable sessions (same predicate as `fetchSessions`).
+    public func fetchSessionListTotal() async -> Int {
+        let sql = "SELECT COUNT(*) FROM \(sessionListFrom) WHERE \(sessionListPredicate)"
+        do {
+            let rows = try await backend.query(sql, params: [])
+            return rows.first?.int(at: 0) ?? 0
+        } catch {
+            Self.logger.warning("fetchSessionListTotal failed: \(error.localizedDescription, privacy: .public)")
+            return 0
         }
     }
 

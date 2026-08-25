@@ -86,6 +86,31 @@ import Foundation
         #expect(first.params == [.integer(100)])
     }
 
+    @Test func fetchSessionsEmitsOffsetWhenRequested() async {
+        let mock = MockHermesQueryBackend()
+        let service = HermesDataService(context: context, backend: mock)
+        _ = await service.open()
+
+        _ = await service.fetchSessions(limit: 100, offset: 100)
+
+        let log = await mock.queryLog
+        #expect(log.count == 1)
+        #expect(log[0].sql.contains("LIMIT ? OFFSET ?"))
+        #expect(log[0].params == [.integer(100), .integer(100)])
+    }
+
+    @Test func fetchSessionListTotalUsesListPredicate() async {
+        let mock = MockHermesQueryBackend()
+        let service = HermesDataService(context: context, backend: mock)
+        _ = await service.open()
+
+        _ = await service.fetchSessionListTotal()
+
+        let sql = await mock.queryLog[0].sql
+        #expect(sql.hasPrefix("SELECT COUNT(*) FROM sessions WHERE"))
+        #expect(sql.contains("parent_session_id IS NULL"))
+    }
+
     @Test func fetchSessionsBareSchemaUsesBaseColumnList() async {
         let mock = MockHermesQueryBackend()
         // Both schema flags off — neither v0.7 nor v0.11 columns selected.

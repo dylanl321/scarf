@@ -33,6 +33,13 @@ public struct IOSServerConfig: Sendable, Hashable, Codable {
     /// Username for basic-auth login. Password lives in Keychain.
     public var serveUsername: String?
 
+    /// Optional Citadel SSH on the same Hermes URL row. Chat / Kanban /
+    /// Cron stay on the URL; Memory, Projects, Plugins, and Curator use
+    /// this companion when present. Additive: old records omit the keys.
+    public var companionHost: String?
+    public var companionUser: String?
+    public var companionPort: Int?
+
     public init(
         host: String,
         user: String? = nil,
@@ -43,7 +50,10 @@ public struct IOSServerConfig: Sendable, Hashable, Codable {
         serveBaseURL: String? = nil,
         serveProfile: String? = nil,
         serveAuthMode: HermesServeAuthMode? = nil,
-        serveUsername: String? = nil
+        serveUsername: String? = nil,
+        companionHost: String? = nil,
+        companionUser: String? = nil,
+        companionPort: Int? = nil
     ) {
         self.host = host
         self.user = user
@@ -55,12 +65,45 @@ public struct IOSServerConfig: Sendable, Hashable, Codable {
         self.serveProfile = serveProfile
         self.serveAuthMode = serveAuthMode
         self.serveUsername = serveUsername
+        self.companionHost = companionHost
+        self.companionUser = companionUser
+        self.companionPort = companionPort
     }
 
     /// `true` when this record points at `hermes serve` instead of SSH.
     public var isServe: Bool {
         guard let serveBaseURL else { return false }
         return !serveBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// `true` when a Hermes URL row also carries companion SSH for files.
+    public var hasCompanionSSH: Bool {
+        guard let companionHost else { return false }
+        return !companionHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// SSH-only copy used by Memory / Projects / Plugins / Curator.
+    public func companionSSHConfig() -> IOSServerConfig? {
+        guard hasCompanionSSH, let companionHost else { return nil }
+        return IOSServerConfig(
+            host: companionHost.trimmingCharacters(in: .whitespacesAndNewlines),
+            user: companionUser,
+            port: companionPort,
+            hermesBinaryHint: hermesBinaryHint,
+            remoteHome: remoteHome,
+            displayName: displayName
+        )
+    }
+
+    public func toSSHCompanionContext(id: ServerID) -> ServerContext? {
+        companionSSHConfig()?.toServerContext(id: id)
+    }
+
+    /// Config for file/CLI screens. Companion SSH when present, otherwise
+    /// this record (SSH-only rows, or URL-only rows that still show the
+    /// "needs SSH" labels).
+    public func fileAccessConfig() -> IOSServerConfig {
+        companionSSHConfig() ?? self
     }
 
     /// Convenience bridge to the `ServerContext` that services across

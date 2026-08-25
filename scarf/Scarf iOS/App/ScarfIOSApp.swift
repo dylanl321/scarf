@@ -244,7 +244,8 @@ final class RootModel {
         servers = (try? await configStore.listAll()) ?? [:]
         if let config = servers[serverID] {
             if config.isServe {
-                state = .connected(serverID, config, nil)
+                let key = try? await keyStore.load(for: serverID)
+                state = .connected(serverID, config, key)
             } else if let key = try? await keyStore.load(for: serverID) {
                 state = .connected(serverID, config, key)
             } else {
@@ -270,7 +271,7 @@ final class RootModel {
             }
             if config.isServe {
                 lastError = nil
-                state = .connected(id, config, nil)
+                state = .connected(id, config, diskKey)
                 return
             }
             guard let key = diskKey else {
@@ -423,6 +424,9 @@ struct RootView: View {
                 },
                 onForget: {
                     await model.forget(id: id)
+                },
+                onRefreshConfig: {
+                    await model.connect(to: id)
                 }
             )
         }

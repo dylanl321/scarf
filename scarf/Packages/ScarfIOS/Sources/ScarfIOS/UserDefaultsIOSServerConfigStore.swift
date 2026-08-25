@@ -57,6 +57,9 @@ public struct UserDefaultsIOSServerConfigStore: IOSServerConfigStore {
     public func delete() async throws {
         defaults.removeObject(forKey: key)
         defaults.removeObject(forKey: legacyKey)
+        #if canImport(Security)
+        try? KeychainIOSServerConfigMirror().deleteAll()
+        #endif
     }
 
     // MARK: - Multi-server API
@@ -64,14 +67,23 @@ public struct UserDefaultsIOSServerConfigStore: IOSServerConfigStore {
     public func listAll() async throws -> [ServerID: IOSServerConfig] {
         // Migrate v1 first so the v2 read below sees the latest data.
         migrateLegacyIfNeeded()
-        guard let data = defaults.data(forKey: key) else { return [:] }
-        let raw = try JSONDecoder().decode([String: IOSServerConfig].self, from: data)
-        var result: [ServerID: IOSServerConfig] = [:]
-        for (idString, config) in raw {
-            guard let uuid = UUID(uuidString: idString) else { continue }
-            result[uuid] = config
+        if let data = defaults.data(forKey: key) {
+            let result = try decodeMap(data)
+            if !result.isEmpty {
+                #if canImport(Security)
+                try? KeychainIOSServerConfigMirror().saveAll(result)
+                #endif
+                return result
+            }
         }
-        return result
+        #if canImport(Security)
+        let recovered = (try? KeychainIOSServerConfigMirror().loadAll()) ?? [:]
+        if !recovered.isEmpty {
+            try writeAll(recovered)
+            return recovered
+        }
+        #endif
+        return [:]
     }
 
     public func load(id: ServerID) async throws -> IOSServerConfig? {
@@ -104,6 +116,16 @@ public struct UserDefaultsIOSServerConfigStore: IOSServerConfigStore {
         return (id, config)
     }
 
+    private func decodeMap(_ data: Data) throws -> [ServerID: IOSServerConfig] {
+        let raw = try JSONDecoder().decode([String: IOSServerConfig].self, from: data)
+        var result: [ServerID: IOSServerConfig] = [:]
+        for (idString, config) in raw {
+            guard let uuid = UUID(uuidString: idString) else { continue }
+            result[uuid] = config
+        }
+        return result
+    }
+
     private func writeAll(_ all: [ServerID: IOSServerConfig]) throws {
         var raw: [String: IOSServerConfig] = [:]
         for (id, config) in all {
@@ -111,6 +133,9 @@ public struct UserDefaultsIOSServerConfigStore: IOSServerConfigStore {
         }
         let data = try JSONEncoder().encode(raw)
         defaults.set(data, forKey: key)
+        #if canImport(Security)
+        try? KeychainIOSServerConfigMirror().saveAll(all)
+        #endif
     }
 
     /// One-shot v1 → v2 migration. If a v1 singleton exists and v2 is

@@ -279,6 +279,30 @@ struct DashboardView: View {
                         sessionRow(session)
                             .listRowBackground(ScarfColor.backgroundSecondary)
                     }
+                    if sessionProjectFilter == nil, vm.hasMoreSessions {
+                        Button {
+                            Task { await vm.loadMoreSessions() }
+                        } label: {
+                            HStack {
+                                Spacer()
+                                if vm.isLoadingMore {
+                                    ProgressView()
+                                } else {
+                                    Text("Load more")
+                                }
+                                Spacer()
+                            }
+                        }
+                        .disabled(vm.isLoadingMore)
+                        .listRowBackground(Color.clear)
+                    }
+                    if vm.totalSessionCount > 0, sessionProjectFilter == nil {
+                        Text("Showing \(vm.allSessions.count) of \(vm.totalSessionCount)")
+                            .font(.caption)
+                            .foregroundStyle(ScarfColor.foregroundMuted)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
                 }
             }
             .listStyle(.plain)

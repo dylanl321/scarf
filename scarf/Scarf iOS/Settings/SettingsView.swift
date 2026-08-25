@@ -28,6 +28,7 @@ struct SettingsView: View {
     /// smoke harness) so the v2.7.5 layout is the unconditional
     /// fallback.
     @Environment(\.hermesCapabilities) private var capabilitiesStore
+    @Environment(\.serverContext) private var serverContext
     private var caps: HermesCapabilities {
         capabilitiesStore?.capabilities ?? .empty
     }
@@ -467,6 +468,14 @@ struct SettingsView: View {
             } label: {
                 Label("Performance", systemImage: "speedometer")
             }
+            NavigationLink {
+                ScarfGoDiagnosticsView(
+                    config: config,
+                    serverID: serverContext.id
+                )
+            } label: {
+                Label("Advanced debugging", systemImage: "ant")
+            }
             // Show the share affordance only when MetricKit has actually
             // persisted a payload to Documents/ScarfDiagnostics/. Apple
             // delivers payloads roughly once per 24h after a crash/hang,
@@ -481,7 +490,7 @@ struct SettingsView: View {
         } header: {
             Text("Diagnostics")
         } footer: {
-            Text("Performance instrumentation. Default mode emits Instruments signposts only; Full mode also keeps a 4096-entry in-memory ring you can copy as JSON. Crash + hang diagnostics from MetricKit are persisted locally and appear here for sharing when Apple delivers them (~once per day after a crash).")
+            Text("Performance instrumentation. Default mode emits Instruments signposts only; Full mode also keeps a 4096-entry in-memory ring you can copy as JSON. Crash + hang diagnostics from MetricKit are persisted locally and appear here for sharing when Apple delivers them (~once per day after a crash). Advanced debugging lands redacted JSONL on this phone with no model calls.")
                 .font(.caption)
         }
     }

@@ -78,6 +78,10 @@ struct WebhooksView: View {
     private func load() async {
         isLoading = true
         defer { isLoading = false }
+        if context.isServe {
+            await loadFromServe()
+            return
+        }
         let ctx = context
         let result = await Task.detached {
             return Self.runHermesList(context: ctx)
@@ -97,6 +101,27 @@ struct WebhooksView: View {
         self.lastError = (parsed.isEmpty && !result.isEmpty)
             ? "Couldn't parse webhook list output"
             : nil
+    }
+
+    private func loadFromServe() async {
+        do {
+            let client = try await HermesServeClient.authenticated(context: context)
+            let payload = try await client.listWebhooks()
+            notEnabled = !(payload.enabled ?? true)
+            webhooks = (payload.subscriptions ?? []).map { hook in
+                WebhookRow(
+                    name: hook.name,
+                    description: hook.description ?? "",
+                    deliver: hook.deliver ?? "",
+                    events: hook.events ?? [],
+                    routeSuffix: hook.url ?? "/webhooks/\(hook.name)"
+                )
+            }
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            webhooks = []
+        }
     }
 
     nonisolated private static func runHermesList(context: ServerContext) -> String {

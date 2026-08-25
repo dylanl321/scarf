@@ -7,7 +7,7 @@ import ScarfDesign
 /// 4-tab layout (Chat | Dashboard | Memory | More) to 5 primary tabs
 /// with Chat in the mathematical center:
 ///
-///     Dashboard | Projects | Chat | Skills | System
+///     Dashboard | Projects (or Kanban on Hermes URL) | Chat | Skills | System
 ///
 /// "Chat in the middle" is the v2.5 product ask — chat is the action
 /// users come back for, so it's the most thumb-reachable slot on a
@@ -29,6 +29,7 @@ struct ScarfGoTabRoot: View {
     let key: SSHKeyBundle?
     let onSoftDisconnect: @MainActor @Sendable () async -> Void
     let onForget: @MainActor @Sendable () async -> Void
+    let onRefreshConfig: @MainActor @Sendable () async -> Void
 
     /// Stable per-tab context UUID — used for the System tab's Curator
     /// row so its CuratorViewModel reuses the cached SSH connection
@@ -56,13 +57,15 @@ struct ScarfGoTabRoot: View {
         config: IOSServerConfig,
         key: SSHKeyBundle?,
         onSoftDisconnect: @escaping @MainActor @Sendable () async -> Void,
-        onForget: @escaping @MainActor @Sendable () async -> Void
+        onForget: @escaping @MainActor @Sendable () async -> Void,
+        onRefreshConfig: @escaping @MainActor @Sendable () async -> Void
     ) {
         self.serverID = serverID
         self.config = config
         self.key = key
         self.onSoftDisconnect = onSoftDisconnect
         self.onForget = onForget
+        self.onRefreshConfig = onRefreshConfig
         // Capability detection is host-level (Hermes version), so it runs
         // against the base context regardless of the selected profile.
         let ctx = config.toServerContext(id: serverID)
@@ -81,6 +84,12 @@ struct ScarfGoTabRoot: View {
         var resolved = config
         if config.isServe {
             resolved.serveProfile = coordinator.selectedProfile
+            if config.hasCompanionSSH {
+                resolved.remoteHome = HermesProfileScope.resolveHome(
+                    baseHome: config.remoteHome ?? HermesPathSet.defaultRemoteHome,
+                    profile: coordinator.selectedProfile
+                )
+            }
             return resolved
         }
         resolved.remoteHome = HermesProfileScope.resolveHome(
@@ -143,20 +152,25 @@ struct ScarfGoTabRoot: View {
             // site, and sessions. Read-only registry on iOS — add /
             // rename / archive happens in the Mac app.
             NavigationStack {
-                if cfg.isServe {
-                    ServeNeedsSSHPlaceholder(
-                        title: "Projects",
-                        message: "Projects, kanban, and AGENTS.md process-cwd need an SSH connection. This Hermes URL server only exposes the dashboard REST API."
-                    )
+                if cfg.isServe && !cfg.hasCompanionSSH {
+                    ScarfGoKanbanView(project: nil, context: ctx)
+                        .navigationTitle("Kanban")
+                        .navigationBarTitleDisplayMode(.inline)
                 } else {
-                    ProjectsListView(config: cfg)
+                    ProjectsListView(config: cfg.fileAccessConfig())
                 }
             }
             .tabItem {
-                Label("Projects", systemImage: "square.grid.2x2")
+                if cfg.isServe && !cfg.hasCompanionSSH {
+                    Label("Kanban", systemImage: "rectangle.split.3x1")
+                } else {
+                    Label("Projects", systemImage: "square.grid.2x2")
+                }
             }
             .tag(ScarfGoCoordinator.Tab.projects)
-            .accessibilityLabel("Projects tab")
+            .accessibilityLabel(
+                (cfg.isServe && !cfg.hasCompanionSSH) ? "Kanban tab" : "Projects tab"
+            )
 
             // 3 — Chat: the reason the app is on your phone. Centered
             // among the 5 tabs for thumb reach + visual prominence.
@@ -187,9 +201,11 @@ struct ScarfGoTabRoot: View {
             // matter here because we never overflow.
             NavigationStack {
                 SystemTab(
+                    serverID: serverID,
                     config: cfg,
                     onSoftDisconnect: onSoftDisconnect,
-                    onForget: onForget
+                    onForget: onForget,
+                    onRefreshConfig: onRefreshConfig
                 )
             }
             .tabItem {
@@ -222,9 +238,11 @@ struct ScarfGoTabRoot: View {
 /// elsewhere — if a feature graduates to a primary tab, that's a
 /// deliberate design decision.
 private struct SystemTab: View {
+    let serverID: ServerID
     let config: IOSServerConfig
     let onSoftDisconnect: @MainActor @Sendable () async -> Void
     let onForget: @MainActor @Sendable () async -> Void
+    let onRefreshConfig: @MainActor @Sendable () async -> Void
 
     @Environment(\.hermesCapabilities) private var capabilitiesStore
 
@@ -238,18 +256,20 @@ private struct SystemTab: View {
     @State private var iCloudSyncEnabled: Bool = SSHKeyICloudPreference.isEnabled
     @State private var iCloudMigrationInFlight = false
     @State private var iCloudMigrationError: String?
+    @State private var showCompanionSSH = false
 
-    // Explicit init so the closure params keep their `@Sendable` annotation —
-    // the synthesized memberwise init dropped it, forcing a non-Sendable→
-    // Sendable conversion at the call site (Swift-6 data-race warning).
     init(
+        serverID: ServerID,
         config: IOSServerConfig,
         onSoftDisconnect: @escaping @MainActor @Sendable () async -> Void,
-        onForget: @escaping @MainActor @Sendable () async -> Void
+        onForget: @escaping @MainActor @Sendable () async -> Void,
+        onRefreshConfig: @escaping @MainActor @Sendable () async -> Void
     ) {
+        self.serverID = serverID
         self.config = config
         self.onSoftDisconnect = onSoftDisconnect
         self.onForget = onForget
+        self.onRefreshConfig = onRefreshConfig
     }
 
     var body: some View {
@@ -258,8 +278,12 @@ private struct SystemTab: View {
                 if config.isServe, let url = config.serveBaseURL {
                     LabeledContent("Hermes URL", value: url)
                         .listRowBackground(ScarfColor.backgroundSecondary)
-                    LabeledContent("Connection", value: "Hermes URL")
+                    LabeledContent("Connection", value: config.hasCompanionSSH ? "Hermes URL + SSH" : "Hermes URL")
                         .listRowBackground(ScarfColor.backgroundSecondary)
+                    if config.hasCompanionSSH, let host = config.companionHost {
+                        LabeledContent("SSH host", value: host)
+                            .listRowBackground(ScarfColor.backgroundSecondary)
+                    }
                 } else {
                     LabeledContent("Host", value: config.host)
                         .listRowBackground(ScarfColor.backgroundSecondary)
@@ -275,28 +299,31 @@ private struct SystemTab: View {
             }
 
             Section("Features") {
-                if config.isServe {
-                    Label("Memory files need SSH", systemImage: "brain.head.profile")
+                if config.isServe && !config.hasCompanionSSH {
+                    Label("MEMORY.md files need SSH", systemImage: "brain.head.profile")
                         .foregroundStyle(ScarfColor.foregroundMuted)
                         .scarfGoCompactListRow()
                         .listRowBackground(ScarfColor.backgroundSecondary)
+                    Button {
+                        showCompanionSSH = true
+                    } label: {
+                        Label("Add SSH for files", systemImage: "key.fill")
+                    }
+                    .scarfGoCompactListRow()
+                    .listRowBackground(ScarfColor.backgroundSecondary)
                 } else {
                     NavigationLink {
-                        MemoryListView(config: config)
+                        MemoryListView(config: config.fileAccessConfig())
                     } label: {
                         Label("Memory", systemImage: "brain.head.profile")
                     }
                     .scarfGoCompactListRow()
                     .listRowBackground(ScarfColor.backgroundSecondary)
                 }
-                if !config.isServe, capabilitiesStore?.capabilities.hasCurator ?? false {
+                if (!config.isServe || config.hasCompanionSSH),
+                   capabilitiesStore?.capabilities.hasCurator ?? false {
                     NavigationLink {
-                        // `config` here is the profile-scoped effectiveConfig, so
-                        // Curator's profile scoping rides on `paths` (remoteHome) —
-                        // NOT on this fixed context id, which only keys the shared
-                        // connection/home cache. Keep it that way: never branch
-                        // Curator behavior on the context id (#120).
-                        CuratorView(context: config.toServerContext(id: ScarfGoTabRoot.systemTabContextID))
+                        CuratorView(context: config.fileAccessConfig().toServerContext(id: ScarfGoTabRoot.systemTabContextID))
                     } label: {
                         Label("Curator", systemImage: "sparkles")
                     }
@@ -319,13 +346,8 @@ private struct SystemTab: View {
                 .listRowBackground(ScarfColor.backgroundSecondary)
             }
 
-            // v2.6: read-only mobile views over CLI-driven Hermes
-            // surfaces. Mac owns the create/edit paths; phones get a
-            // monitoring window into what the remote agent is honoring.
-            // None of these are capability-gated — the underlying
-            // `hermes plugins/profile/webhook list` verbs exist on
-            // both v0.11 and v0.12, so the read views work on either.
-            if !config.isServe {
+            // Read-only inspect lists. Hermes URL uses dashboard REST for
+            // webhooks + profiles; plugin directory listing is still SSH.
             Section("Inspect") {
                 NavigationLink {
                     WebhooksView(config: config)
@@ -334,13 +356,20 @@ private struct SystemTab: View {
                 }
                 .scarfGoCompactListRow()
                 .listRowBackground(ScarfColor.backgroundSecondary)
-                NavigationLink {
-                    PluginsView(config: config)
-                } label: {
-                    Label("Plugins", systemImage: "app.badge.checkmark")
+                if config.isServe && !config.hasCompanionSSH {
+                    Label("Plugin directory listing needs SSH", systemImage: "app.badge.checkmark")
+                        .foregroundStyle(ScarfColor.foregroundMuted)
+                        .scarfGoCompactListRow()
+                        .listRowBackground(ScarfColor.backgroundSecondary)
+                } else {
+                    NavigationLink {
+                        PluginsView(config: config.fileAccessConfig())
+                    } label: {
+                        Label("Plugins", systemImage: "app.badge.checkmark")
+                    }
+                    .scarfGoCompactListRow()
+                    .listRowBackground(ScarfColor.backgroundSecondary)
                 }
-                .scarfGoCompactListRow()
-                .listRowBackground(ScarfColor.backgroundSecondary)
                 NavigationLink {
                     ProfilesView(config: config)
                 } label: {
@@ -349,19 +378,17 @@ private struct SystemTab: View {
                 .scarfGoCompactListRow()
                 .listRowBackground(ScarfColor.backgroundSecondary)
             }
-            }
 
-            if !config.isServe {
             Section {
                 Toggle(isOn: $iCloudSyncEnabled) {
                     HStack(spacing: 10) {
                         Image(systemName: "key.icloud.fill")
                             .foregroundStyle(.tint)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Sync SSH key with iCloud Keychain")
+                            Text("Sync login with iCloud Keychain")
                             Text(iCloudSyncEnabled
-                                 ? "Synced — your other Apple devices with iCloud Keychain will see this key."
-                                 : "This device only — generate a separate key on each device.")
+                                 ? "Synced — uninstalling and reinstalling on this Apple ID restores hosts and login."
+                                 : "This device only — reinstalling wipes hosts and passwords.")
                                 .font(.caption)
                                 .foregroundStyle(ScarfColor.foregroundMuted)
                         }
@@ -376,15 +403,10 @@ private struct SystemTab: View {
                         defer { iCloudMigrationInFlight = false }
                         do {
                             try await KeychainSSHKeyStore().migrateAllItems(toICloudSync: newValue)
+                            try await KeychainHermesServeCredentialStore().migrateAllItems(toICloudSync: newValue)
+                            let all = try await UserDefaultsIOSServerConfigStore().listAll()
+                            try KeychainIOSServerConfigMirror().saveAll(all)
                         } catch {
-                            // Revert the toggle on failure so the UI
-                            // reflects what's actually in the Keychain;
-                            // surface the error inline so the user can
-                            // retry / report. Keychain failures here are
-                            // rare (typically `errSecDuplicateItem` if a
-                            // prior migration was interrupted — the
-                            // delete-with-Any in writeBundle prevents
-                            // that, but we still belt-and-brace).
                             iCloudMigrationError = error.localizedDescription
                             iCloudSyncEnabled = !newValue
                             SSHKeyICloudPreference.isEnabled = !newValue
@@ -408,11 +430,10 @@ private struct SystemTab: View {
             } header: {
                 Text("Security")
             } footer: {
-                Text("End-to-end encrypted via iCloud Keychain. With Advanced Data Protection on, the encryption keys never leave your devices. Toggle off to keep the key device-only — each new device must onboard separately.")
+                Text("End-to-end encrypted via iCloud Keychain. Passwords never go in UserDefaults. With Advanced Data Protection on, encryption keys never leave your devices. Toggle off to keep secrets device-only.")
                     .font(.caption)
             }
             .listRowBackground(ScarfColor.backgroundSecondary)
-            }
 
             Section {
                 Button {
@@ -464,6 +485,20 @@ private struct SystemTab: View {
         .background(ScarfColor.backgroundPrimary)
         .navigationTitle("System")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showCompanionSSH) {
+            OnboardingRootView(
+                targetServerID: serverID,
+                canCancel: true,
+                attachCompanionTo: config,
+                onFinished: {
+                    showCompanionSSH = false
+                    await onRefreshConfig()
+                },
+                onCancel: {
+                    showCompanionSSH = false
+                }
+            )
+        }
         .confirmationDialog(
             "Forget this server?",
             isPresented: $showForgetConfirmation,
@@ -481,21 +516,5 @@ private struct SystemTab: View {
                  ? "Host details for \(config.displayName) will be removed. Other servers stay configured. This cannot be undone."
                  : "Your SSH key and host settings for \(config.displayName) will be removed. Other servers stay configured. This cannot be undone.")
         }
-    }
-}
-
-struct ServeNeedsSSHPlaceholder: View {
-    let title: String
-    let message: String
-
-    var body: some View {
-        ContentUnavailableView {
-            Label(title, systemImage: "lock.slash")
-        } description: {
-            Text(message)
-        }
-        .background(ScarfColor.backgroundPrimary)
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
