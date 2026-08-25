@@ -95,6 +95,8 @@ public final class HermesVersionCache: @unchecked Sendable {
             let user = config.user ?? "-"
             let port = config.port.map(String.init) ?? "22"
             return "ssh|\(user)@\(config.host):\(port)|\(context.paths.home)"
+        case .serve(let config):
+            return config.fingerprint
         }
     }
 
@@ -224,12 +226,21 @@ public final class HermesVersionCache: @unchecked Sendable {
 
     // MARK: - Default probe
 
+    /// Record a successful probe that did not go through `subprocessProbe`
+    /// (e.g. `GET /api/status` on a Hermes URL connection).
+    public func remember(_ caps: HermesCapabilities, for context: ServerContext) {
+        record(caps, key: Self.key(for: context), context: context)
+    }
+
     /// The real probe: runs `hermes --version` over this server's transport
     /// (LocalTransport on Mac, SSH/Citadel on iOS) and parses the output.
     ///
     /// Lives here rather than on `HermesCapabilities` because
     /// `ServerContext.makeTransport()` is side-effecting; the parser stays pure.
     public static let subprocessProbe: Probe = { context in
+        if case .serve(let config) = context.kind {
+            return serveHTTPProbe(config)
+        }
         let transport = context.makeTransport()
         do {
             let result = try transport.runProcess(
@@ -247,4 +258,33 @@ public final class HermesVersionCache: @unchecked Sendable {
             return .empty
         }
     }
+
+    /// Synchronous `GET /api/status` so the existing cache probe contract
+    /// (`(ServerContext) -> HermesCapabilities`) works for serve too.
+    private static func serveHTTPProbe(_ config: HermesServeConfig) -> HermesCapabilities {
+        let trimmed = config.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let origin = URL(string: trimmed) else { return .empty }
+        guard let url = URL(string: "/api/status", relativeTo: origin) else { return .empty }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        let box = ServeProbeBox()
+        let sem = DispatchSemaphore(value: 0)
+        let task = URLSession.shared.dataTask(with: request) { data, _, _ in
+            defer { sem.signal() }
+            guard let data,
+                  let status = try? JSONDecoder().decode(HermesServeStatus.self, from: data)
+            else { return }
+            let line = status.versionLineForCapabilities
+            guard !line.isEmpty else { return }
+            box.caps = HermesCapabilities.parse(line)
+        }
+        task.resume()
+        _ = sem.wait(timeout: .now() + 12)
+        return box.caps
+    }
+}
+
+/// Tiny box so the URLSession callback can write a value-type result.
+private final class ServeProbeBox: @unchecked Sendable {
+    var caps: HermesCapabilities = .empty
 }

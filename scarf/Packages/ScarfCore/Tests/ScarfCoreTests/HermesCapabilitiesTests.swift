@@ -533,6 +533,7 @@ import Foundation
         let caps = HermesCapabilities.parseLine("Hermes Agent v0.18.0 (2026.7.1)")
         #expect(caps.hasCronAttachToSession)
         #expect(caps.hasMCPReauth)
+        #expect(caps.hasHermesServe)
         #expect(caps.isV018OrLater)
     }
 
@@ -542,6 +543,7 @@ import Foundation
         let caps = HermesCapabilities.parseLine("Hermes Agent v0.17.0 (2026.6.19)")
         #expect(!caps.hasCronAttachToSession)
         #expect(!caps.hasMCPReauth)
+        #expect(!caps.hasHermesServe)
         #expect(!caps.isV018OrLater)
         // v0.17 surfaces stay alive on a v0.17 host.
         #expect(caps.hasCuratorConsolidate)

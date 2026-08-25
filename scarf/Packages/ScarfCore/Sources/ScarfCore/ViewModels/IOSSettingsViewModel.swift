@@ -36,6 +36,10 @@ public final class IOSSettingsViewModel {
     public func load() async {
         isLoading = true
         lastError = nil
+        if context.isServe {
+            await loadFromServe()
+            return
+        }
         let ctx = context
         let path = ctx.paths.configYAML
 
@@ -123,6 +127,12 @@ public final class IOSSettingsViewModel {
         isSaving = true
         defer { isSaving = false }
 
+        if context.isServe {
+            try await saveValueOnServe(key: key, value: value)
+            await load()
+            return
+        }
+
         let ctx = context
         let hermes = ctx.paths.hermesBinary
         // Pass through the same PATH-prefix trick ACPClient+iOS uses
@@ -162,6 +172,98 @@ public final class IOSSettingsViewModel {
     /// key and the value on the remote command line.
     private func shellEscape(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    private func loadFromServe() async {
+        guard let cfg = context.serveConfig else {
+            lastError = HermesServeError.notAServeContext.errorDescription
+            isLoading = false
+            return
+        }
+        do {
+            let client = HermesServeClient(config: cfg)
+            try await client.authenticate(serverID: context.id, username: cfg.username)
+            let data = try await client.fetchConfigJSON()
+            if let pretty = Self.prettyJSON(data) {
+                rawYAML = pretty
+            } else {
+                rawYAML = String(data: data, encoding: .utf8) ?? ""
+            }
+            config = HermesConfig(yaml: Self.yamlishFromJSON(data))
+        } catch {
+            lastError = error.localizedDescription
+            config = .empty
+            rawYAML = ""
+        }
+        isLoading = false
+    }
+
+    private func saveValueOnServe(key: String, value: String) async throws {
+        guard let cfg = context.serveConfig else {
+            throw HermesServeError.notAServeContext
+        }
+        let client = HermesServeClient(config: cfg)
+        try await client.authenticate(serverID: context.id, username: cfg.username)
+        let data = try await client.fetchConfigJSON()
+        let patched = try Self.setJSONValue(data, dottedKey: key, value: value)
+        try await client.putConfigJSON(patched)
+    }
+
+    private static func prettyJSON(_ data: Data) -> String? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data),
+              let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+        else { return nil }
+        return String(data: pretty, encoding: .utf8)
+    }
+
+    /// Flatten a JSON object into `key: value` lines so `HermesConfig(yaml:)`
+    /// can still pick out the fields it knows.
+    private static func yamlishFromJSON(_ data: Data) -> String {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+        var lines: [String] = []
+        func walk(_ node: Any, prefix: String) {
+            if let dict = node as? [String: Any] {
+                for (k, v) in dict.sorted(by: { $0.key < $1.key }) {
+                    let next = prefix.isEmpty ? k : "\(prefix).\(k)"
+                    walk(v, prefix: next)
+                }
+            } else if let arr = node as? [Any] {
+                let joined = arr.map { "\($0)" }.joined(separator: ", ")
+                lines.append("\(prefix): [\(joined)]")
+            } else {
+                lines.append("\(prefix): \(node)")
+            }
+        }
+        walk(obj, prefix: "")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func setJSONValue(_ data: Data, dottedKey: String, value: String) throws -> Data {
+        let obj = try JSONSerialization.jsonObject(with: data)
+        guard var root = obj as? [String: Any] else {
+            throw HermesServeError.decoding("config is not a JSON object")
+        }
+        let parts = dottedKey.split(separator: ".").map(String.init)
+        guard !parts.isEmpty else { throw HermesServeError.decoding("empty config key") }
+        func set(_ dict: inout [String: Any], path: [String], value: Any) {
+            guard let first = path.first else { return }
+            if path.count == 1 {
+                dict[first] = value
+                return
+            }
+            var child = dict[first] as? [String: Any] ?? [:]
+            set(&child, path: Array(path.dropFirst()), value: value)
+            dict[first] = child
+        }
+        let typed: Any
+        if value == "true" { typed = true }
+        else if value == "false" { typed = false }
+        else if let n = Int(value) { typed = n }
+        else { typed = value }
+        set(&root, path: parts, value: typed)
+        return try JSONSerialization.data(withJSONObject: root)
     }
 }
 

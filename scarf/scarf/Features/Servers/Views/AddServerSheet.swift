@@ -12,7 +12,7 @@ struct AddServerSheet: View {
 
     /// Called when the user confirms. Caller persists via `ServerRegistry`
     /// and typically switches the active window's context to the new server.
-    let onSave: (_ displayName: String, _ config: SSHConfig) -> Void
+    let onSave: (_ displayName: String, _ kind: ServerKind, _ secret: String?) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -50,11 +50,34 @@ struct AddServerSheet: View {
                 .font(.subheadline).bold()
                 .foregroundStyle(.secondary)
 
+            Picker("Connect via", selection: $viewModel.mode) {
+                ForEach(AddServerViewModel.ConnectionMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
             LabeledField("Name") {
                 TextField("Optional — defaults to hostname", text: $viewModel.displayName)
                     .textFieldStyle(.roundedBorder)
             }
 
+            if viewModel.mode == .serve {
+                LabeledField("Hermes URL") {
+                    TextField("http://host:9119", text: $viewModel.serveURL)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                }
+                LabeledField("Username") {
+                    TextField("If the dashboard requires login", text: $viewModel.serveUsername)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                }
+                LabeledField("Password") {
+                    SecureField("Stored in Keychain", text: $viewModel.servePassword)
+                        .textFieldStyle(.roundedBorder)
+                }
+            } else {
             LabeledField("Host") {
                 TextField("hermes.example.com or a ~/.ssh/config alias", text: $viewModel.host)
                     .textFieldStyle(.roundedBorder)
@@ -131,6 +154,7 @@ struct AddServerSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)
+            }
         }
     }
 
@@ -227,7 +251,11 @@ struct AddServerSheet: View {
             Button("Cancel") { dismiss() }
                 .keyboardShortcut(.cancelAction)
             Button("Save") {
-                onSave(viewModel.resolvedDisplayName, viewModel.configForSave())
+                onSave(
+                    viewModel.resolvedDisplayName,
+                    viewModel.kindForSave(),
+                    viewModel.serveSecretForSave
+                )
                 dismiss()
             }
             .keyboardShortcut(.defaultAction)

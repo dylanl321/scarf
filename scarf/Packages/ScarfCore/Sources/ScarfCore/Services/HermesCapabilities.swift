@@ -538,6 +538,10 @@ public struct HermesCapabilities: Sendable, Equatable {
     /// ungated.
     public var hasTitleGenerationLanguage: Bool { atLeastSemver(0, 18, 0) }
 
+    /// `hermes serve` / `hermes dashboard` HTTP+WebSocket backend (v0.18+).
+    /// Serve connections require this floor; SSH hosts may be older.
+    public var hasHermesServe: Bool { atLeastSemver(0, 18, 0) }
+
     // MARK: v0.19 (v2026.7.20) flags
 
     /// `hermes config get <key>` / `hermes config unset <key>` subcommands

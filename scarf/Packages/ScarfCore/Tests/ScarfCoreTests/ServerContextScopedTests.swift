@@ -67,4 +67,16 @@ import Foundation
         #expect(scoped.paths.home == local.paths.home)
         #expect(!scoped.isRemote)
     }
+
+    @Test func serveContextScopesProfileQuery() {
+        let ctx = ServerContext(
+            id: ServerID(),
+            displayName: "Serve",
+            kind: .serve(HermesServeConfig(baseURL: "http://example:9119"))
+        )
+        let scoped = ctx.scoped(toProfile: "work")
+        #expect(scoped.isServe)
+        #expect(scoped.serveConfig?.profile == "work")
+        #expect(scoped.id == ctx.id)
+    }
 }

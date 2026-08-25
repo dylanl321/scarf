@@ -35,7 +35,9 @@ struct CronListView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("No cron jobs yet.")
                             .font(.headline)
-                        Text("Tap \(Image(systemName: "plus.circle.fill")) to create one, or manage them from the Mac app.")
+                        Text(config.isServe
+                             ? "Pause, resume, or delete jobs here. Creating jobs needs SSH or the Hermes dashboard."
+                             : "Tap \(Image(systemName: "plus.circle.fill")) to create one, or manage them from the Mac app.")
                             .font(.caption)
                             .foregroundStyle(ScarfColor.foregroundMuted)
                     }
@@ -47,7 +49,7 @@ struct CronListView: View {
                         CronRow(job: job) {
                             Task { await vm.toggleEnabled(id: job.id) }
                         } onTap: {
-                            editingJob = job
+                            if !config.isServe { editingJob = job }
                         }
                         .scarfGoCompactListRow()
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -67,13 +69,15 @@ struct CronListView: View {
         .navigationTitle("Cron jobs")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showingNewJob = true
-                } label: {
-                    Image(systemName: "plus.circle.fill")
+            if !config.isServe {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingNewJob = true
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                    }
+                    .disabled(vm.isSaving)
                 }
-                .disabled(vm.isSaving)
             }
         }
         .overlay {

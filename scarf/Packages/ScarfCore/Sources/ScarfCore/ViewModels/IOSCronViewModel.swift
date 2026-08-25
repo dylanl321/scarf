@@ -26,6 +26,10 @@ public final class IOSCronViewModel {
     public func load() async {
         isLoading = true
         lastError = nil
+        if context.isServe {
+            await loadFromServe()
+            return
+        }
         let ctx = context
         let path = ctx.paths.cronJobsJSON
 
@@ -131,6 +135,17 @@ public final class IOSCronViewModel {
         // context here only ever comes from a macOS-hosted unit test,
         // where spawning the developer's real `hermes` would be both
         // wrong and non-deterministic. Local → straight to the fallback.
+        if context.isServe {
+            isSaving = true
+            let ok = await toggleOnServe(id: id, enabled: enabled)
+            isSaving = false
+            if ok {
+                lastToggleRoute = .cli
+                await load()
+            }
+            return ok
+        }
+
         isSaving = true
         let outcome: CLIOutcome = context.isRemote
             ? await Self.runCronCLI(enabled ? "resume" : "pause", jobID: id, context: context)
@@ -235,6 +250,9 @@ public final class IOSCronViewModel {
     /// Remove the job with `id` and save.
     @discardableResult
     public func delete(id: String) async -> Bool {
+        if context.isServe {
+            return await deleteOnServe(id: id)
+        }
         let updated = jobs.filter { $0.id != id }
         guard updated.count != jobs.count else { return false }
         return await saveJobs(updated)
@@ -243,6 +261,10 @@ public final class IOSCronViewModel {
     /// Add a new job or replace an existing one with matching id.
     @discardableResult
     public func upsert(_ job: HermesCronJob) async -> Bool {
+        if context.isServe {
+            lastError = "Adding or editing cron jobs over a Hermes URL is not supported yet. Pause, resume, or delete here — or connect over SSH to create jobs."
+            return false
+        }
         var updated = jobs
         if let idx = updated.firstIndex(where: { $0.id == job.id }) {
             updated[idx] = job
@@ -309,6 +331,60 @@ public final class IOSCronViewModel {
             case (nil, _?):        return false
             case (nil, nil):       return lhs.name < rhs.name
             }
+        }
+    }
+
+    private func loadFromServe() async {
+        guard let cfg = context.serveConfig else {
+            lastError = HermesServeError.notAServeContext.errorDescription
+            isLoading = false
+            return
+        }
+        do {
+            let client = HermesServeClient(config: cfg)
+            try await client.authenticate(serverID: context.id, username: cfg.username)
+            jobs = Self.sorted(try await client.listCronJobsDecoded())
+        } catch {
+            lastError = error.localizedDescription
+            jobs = []
+        }
+        isLoading = false
+    }
+
+    private func toggleOnServe(id: String, enabled: Bool) async -> Bool {
+        guard let cfg = context.serveConfig else {
+            lastError = HermesServeError.notAServeContext.errorDescription
+            return false
+        }
+        do {
+            let client = HermesServeClient(config: cfg)
+            try await client.authenticate(serverID: context.id, username: cfg.username)
+            if enabled {
+                try await client.resumeCronJob(id: id)
+            } else {
+                try await client.pauseCronJob(id: id)
+            }
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func deleteOnServe(id: String) async -> Bool {
+        guard let cfg = context.serveConfig else {
+            lastError = HermesServeError.notAServeContext.errorDescription
+            return false
+        }
+        do {
+            let client = HermesServeClient(config: cfg)
+            try await client.authenticate(serverID: context.id, username: cfg.username)
+            try await client.deleteCronJob(id: id)
+            await load()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
         }
     }
 

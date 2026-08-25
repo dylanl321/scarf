@@ -36,8 +36,15 @@ struct ManageServersView: View {
         }
         .frame(width: 440, height: 380)
         .sheet(isPresented: $showAddSheet) {
-            AddServerSheet { name, config in
-                _ = registry.addServer(displayName: name, config: config)
+            AddServerSheet { name, kind, secret in
+                let entry = registry.addServer(displayName: name, kind: kind)
+                if let secret, case .serve(let cfg) = kind {
+                    Task {
+                        let store = KeychainHermesServeCredentialStore()
+                        try? await store.save(secret, for: entry.id)
+                        try? await store.save(secret, fingerprint: cfg.fingerprint)
+                    }
+                }
             }
         }
         .sheet(item: Binding(
@@ -235,6 +242,10 @@ struct ManageServersView: View {
                         Text(verbatim: entry.displayName).font(.body)
                         if case .ssh(let config) = entry.kind {
                             Text(summary(for: config))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if case .serve(let config) = entry.kind {
+                            Text(config.baseURL)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

@@ -121,6 +121,7 @@ struct ServerListView: View {
         let host: String
         let port: Int?
         let user: String?
+        let isServe: Bool
     }
 
     /// Project the model's `servers` dict into a sortable list.
@@ -132,9 +133,10 @@ struct ServerListView: View {
                 ServerRow(
                     id: id,
                     displayName: config.displayName,
-                    host: config.host,
+                    host: config.serveBaseURL ?? config.host,
                     port: config.port,
-                    user: config.user
+                    user: config.user,
+                    isServe: config.isServe
                 )
             }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
@@ -191,6 +193,9 @@ private struct ServerListRow: View {
     /// Second-row subtitle: `user@host:port` when fully specified,
     /// else whichever pieces are known.
     private var hostLine: String {
+        if row.isServe {
+            return row.host
+        }
         var parts: [String] = []
         if let user = row.user, !user.isEmpty {
             parts.append("\(user)@\(row.host)")

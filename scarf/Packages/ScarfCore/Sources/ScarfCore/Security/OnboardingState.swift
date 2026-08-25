@@ -6,6 +6,10 @@ import Foundation
 ///
 /// **Flow:**
 /// ```
+/// .chooseConnection ─▶  .serverDetails   (user picks SSH)
+///                   ─▶  .serveDetails    (user picks Hermes URL)
+/// .serveDetails     ─▶  .testConnection  (GET /api/status + optional login)
+///                   ─▶  .connected
 /// .serverDetails  ─▶  .keySource        (user taps "Next")
 /// .keySource      ─▶  .generate         (user picks "Create new key")
 ///                 ─▶  .importKey        (user picks "Import existing key")
@@ -15,9 +19,11 @@ import Foundation
 /// .testConnection ─▶  .connected        (ssh exec "echo ok" succeeded)
 ///                 ─▶  .testFailed       (connect failed — allow retry)
 /// .testFailed     ─▶  .testConnection   (retry)
-///                 ─▶  .serverDetails    (back)
+///                 ─▶  .serverDetails / .serveDetails    (back)
 /// ```
 public enum OnboardingStep: Sendable, Equatable {
+    case chooseConnection
+    case serveDetails
     case serverDetails
     case keySource
     case generate
@@ -26,6 +32,12 @@ public enum OnboardingStep: Sendable, Equatable {
     case testConnection
     case testFailed(reason: String)
     case connected
+}
+
+/// First-step chooser: classic SSH vs `hermes serve` URL.
+public enum OnboardingConnectionKind: Sendable, Equatable {
+    case ssh
+    case serve
 }
 
 /// What the user wants to do with the SSH key at the start of
@@ -77,6 +89,28 @@ public enum OnboardingLogic {
             isHostValid: hostValid,
             isPortValid: portValid,
             canAdvance: hostValid && portValid
+        )
+    }
+
+    /// Validate a Hermes URL origin (`http(s)://host[:port]`).
+    public static func validateServeURL(_ raw: String) -> OnboardingServerDetailsValidation {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              url.host != nil,
+              !trimmed.contains(" ")
+        else {
+            return OnboardingServerDetailsValidation(
+                isHostValid: false,
+                isPortValid: true,
+                canAdvance: false
+            )
+        }
+        return OnboardingServerDetailsValidation(
+            isHostValid: true,
+            isPortValid: true,
+            canAdvance: true
         )
     }
 

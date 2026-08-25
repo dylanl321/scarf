@@ -102,6 +102,10 @@ public final class SkillsViewModel {
     public func load(pinnedNames: Set<String>? = nil) async {
         isLoading = true
         lastError = nil
+        if context.isServe {
+            await loadFromServe()
+            return
+        }
         let ctx = context
         let xport = transport
         let pins = pinnedNames
@@ -131,6 +135,39 @@ public final class SkillsViewModel {
         }.value
         bundles = loadedBundles
         isLoading = false
+    }
+
+    @MainActor
+    private func loadFromServe() async {
+        guard let cfg = context.serveConfig else {
+            lastError = HermesServeError.notAServeContext.errorDescription
+            isLoading = false
+            return
+        }
+        do {
+            let client = HermesServeClient(config: cfg)
+            try await client.authenticate(serverID: context.id, username: cfg.username)
+            categories = try await client.listSkillCategories()
+            bundles = []
+        } catch {
+            lastError = error.localizedDescription
+            categories = []
+            bundles = []
+        }
+        isLoading = false
+    }
+
+    @MainActor
+    public func toggleSkillOnServe(name: String, enabled: Bool) async {
+        guard let cfg = context.serveConfig else { return }
+        do {
+            let client = HermesServeClient(config: cfg)
+            try await client.authenticate(serverID: context.id, username: cfg.username)
+            try await client.toggleSkill(name: name, enabled: enabled)
+            await load()
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     /// Read the curator's pinned-skills list from

@@ -10,6 +10,18 @@ import AppKit
 final class AddServerViewModel {
     /// Name shown in the server picker (defaults to host if the user leaves
     /// it blank).
+    enum ConnectionMode: String, CaseIterable, Identifiable {
+        case ssh = "SSH"
+        case serve = "Hermes URL"
+        var id: String { rawValue }
+    }
+
+    var mode: ConnectionMode = .ssh
+    var serveURL: String = ""
+    var serveUsername: String = ""
+    var servePassword: String = ""
+    private var lastServeAuthMode: HermesServeAuthMode = .basic
+
     var displayName: String = ""
     var host: String = ""
     var user: String = ""
@@ -69,12 +81,21 @@ final class AddServerViewModel {
     /// Hostname or alias is the only required field; everything else
     /// defaults to `~/.ssh/config` / ssh-agent.
     var canSave: Bool {
-        !host.trimmingCharacters(in: .whitespaces).isEmpty
+        switch mode {
+        case .ssh:
+            return !host.trimmingCharacters(in: .whitespaces).isEmpty
+        case .serve:
+            return OnboardingLogic.validateServeURL(serveURL).canAdvance
+        }
     }
 
     var resolvedDisplayName: String {
         let trimmed = displayName.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty { return trimmed }
+        if mode == .serve {
+            return URL(string: serveURL.trimmingCharacters(in: .whitespacesAndNewlines))?.host
+                ?? serveURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         return host.trimmingCharacters(in: .whitespaces)
     }
 
@@ -110,9 +131,66 @@ final class AddServerViewModel {
         isTesting = true
         defer { isTesting = false }
 
+        if mode == .serve {
+            await testServe()
+            return
+        }
         let config = draftConfig
         let probe = TestConnectionProbe(config: config)
         testResult = await probe.run()
+    }
+
+    private func testServe() async {
+        let trimmed = serveURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        var config = HermesServeConfig(
+            baseURL: trimmed,
+            authMode: .basic,
+            username: nonEmpty(serveUsername)
+        )
+        let client = HermesServeClient(config: config)
+        do {
+            let status = try await client.probe()
+            lastServeAuthMode = status.advertisedAuthMode
+            config.authMode = status.advertisedAuthMode
+            if status.advertisedAuthMode == .basic {
+                try await client.loginBasic(
+                    username: serveUsername.trimmingCharacters(in: .whitespaces),
+                    password: servePassword
+                )
+            }
+            testResult = .success(
+                hermesPath: status.versionLineForCapabilities.isEmpty
+                    ? "hermes serve"
+                    : status.versionLineForCapabilities,
+                dbFound: true,
+                suggestedRemoteHome: nil
+            )
+        } catch {
+            testResult = .failure(
+                message: error.localizedDescription,
+                stderr: "",
+                command: "GET \(trimmed)/api/status"
+            )
+        }
+    }
+
+    func kindForSave() -> ServerKind {
+        switch mode {
+        case .ssh:
+            return .ssh(configForSave())
+        case .serve:
+            return .serve(HermesServeConfig(
+                baseURL: serveURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                authMode: lastServeAuthMode,
+                username: nonEmpty(serveUsername)
+            ))
+        }
+    }
+
+    var serveSecretForSave: String? {
+        guard mode == .serve else { return nil }
+        let trimmed = servePassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// If the test succeeded, we prefer to save the probed binary path into

@@ -224,13 +224,21 @@ import Foundation
         return (vm, ks, cs, tester)
     }
 
-    @Test @MainActor func vmStartsAtServerDetails() async {
+    @Test @MainActor func vmStartsAtChooseConnection() async {
         let (vm, _, _, _) = await makeVM()
+        #expect(vm.step == .chooseConnection)
+    }
+
+    @Test @MainActor func vmPickSSHGoesToServerDetails() async {
+        let (vm, _, _, _) = await makeVM()
+        vm.pickSSH()
         #expect(vm.step == .serverDetails)
+        #expect(vm.connectionKind == .ssh)
     }
 
     @Test @MainActor func vmBlocksAdvanceOnInvalidHost() async {
         let (vm, _, _, _) = await makeVM()
+        vm.pickSSH()
         vm.host = ""
         vm.advanceFromServerDetails()
         #expect(vm.step == .serverDetails)
@@ -238,6 +246,7 @@ import Foundation
 
     @Test @MainActor func vmAdvancesOnValidHost() async {
         let (vm, _, _, _) = await makeVM()
+        vm.pickSSH()
         vm.host = "box.local"
         vm.advanceFromServerDetails()
         #expect(vm.step == .keySource)
@@ -245,6 +254,7 @@ import Foundation
 
     @Test @MainActor func vmGenerateHappyPath() async {
         let (vm, ks, cs, _) = await makeVM()
+        vm.pickSSH()
         vm.host = "box.local"
         vm.user = "alan"
         vm.displayName = "Home"
@@ -261,6 +271,7 @@ import Foundation
 
     @Test @MainActor func vmConfirmPublicKeySavesAndStartsTest() async {
         let (vm, ks, cs, tester) = await makeVM()
+        vm.pickSSH()
         vm.host = "box.local"
         vm.user = "alan"
         vm.displayName = "Home"
@@ -282,6 +293,7 @@ import Foundation
         let (vm, _, cs, _) = await makeVM(
             testerBehavior: .failure(.hostUnreachable(host: "box.local", underlying: "no route"))
         )
+        vm.pickSSH()
         vm.host = "box.local"
         vm.advanceFromServerDetails()
         vm.pickKeyChoice(.generate)
@@ -300,6 +312,7 @@ import Foundation
         let (vm, _, cs, tester) = await makeVM(
             testerBehavior: .failure(.authenticationFailed(host: "h", detail: "x"))
         )
+        vm.pickSSH()
         vm.host = "box.local"
         vm.advanceFromServerDetails()
         vm.pickKeyChoice(.generate)
@@ -320,6 +333,7 @@ import Foundation
 
     @Test @MainActor func vmImportKeyHappyPath() async {
         let (vm, _, _, _) = await makeVM()
+        vm.pickSSH()
         vm.host = "box.local"
         vm.advanceFromServerDetails()
         vm.pickKeyChoice(.importExisting)
@@ -340,6 +354,7 @@ import Foundation
 
     @Test @MainActor func vmImportRejectsBadPEM() async {
         let (vm, _, _, _) = await makeVM()
+        vm.pickSSH()
         vm.host = "h"
         vm.advanceFromServerDetails()
         vm.pickKeyChoice(.importExisting)
@@ -357,6 +372,7 @@ import Foundation
 
     @Test @MainActor func vmResetClearsEverything() async {
         let (vm, ks, cs, _) = await makeVM()
+        vm.pickSSH()
         vm.host = "box.local"
         vm.user = "alan"
         vm.advanceFromServerDetails()
@@ -365,11 +381,54 @@ import Foundation
         await vm.confirmPublicKeyAdded()
 
         await vm.reset()
-        #expect(vm.step == .serverDetails)
+        #expect(vm.step == .chooseConnection)
         #expect(vm.host == "")
         #expect(vm.user == "")
         #expect(vm.keyBundle == nil)
         #expect(try! await ks.load() == nil)
         #expect(try! await cs.load() == nil)
+    }
+
+    @Test @MainActor func vmServeHappyPathSavesConfigWithoutKey() async {
+        let ks = InMemorySSHKeyStore()
+        let cs = InMemoryIOSServerConfigStore()
+        let creds = InMemoryHermesServeCredentialStore()
+        let tester = MockSSHConnectionTester()
+        let id = ServerID()
+        let vm = OnboardingViewModel(
+            keyStore: ks,
+            configStore: cs,
+            tester: tester,
+            keyGenerator: {
+                SSHKeyBundle(
+                    privateKeyPEM: "p",
+                    publicKeyOpenSSH: "ssh-ed25519 x n",
+                    comment: "n",
+                    createdAt: ""
+                )
+            },
+            targetServerID: id,
+            serveCredentials: creds,
+            serveProber: { _, _, _ in
+                HermesServeStatus(
+                    version: "v0.20.4",
+                    auth_required: true
+                )
+            }
+        )
+        vm.pickHermesURL()
+        #expect(vm.step == .serveDetails)
+        vm.serveURL = "http://192.168.1.10:9119"
+        vm.serveUsername = "alan"
+        vm.servePassword = "secret"
+        vm.displayName = "Pi"
+        await vm.testServeConnection()
+        #expect(vm.step == .connected)
+        let saved = try! await cs.load(id: id)
+        #expect(saved?.isServe == true)
+        #expect(saved?.serveBaseURL == "http://192.168.1.10:9119")
+        #expect(saved?.serveUsername == "alan")
+        #expect(try! await ks.load(for: id) == nil)
+        #expect(try! await creds.load(for: id) == "secret")
     }
 }

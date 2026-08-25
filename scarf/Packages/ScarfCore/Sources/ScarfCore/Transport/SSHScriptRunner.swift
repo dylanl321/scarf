@@ -104,6 +104,8 @@ public enum SSHScriptRunner {
                         return await runLocally(script: script, timeout: timeout, cancelFlag: cancelFlag)
                     case .ssh(let config):
                         return await runOverSSH(script: script, config: config, timeout: timeout, cancelFlag: cancelFlag)
+                    case .serve:
+                        return .connectFailure("Hermes URL connections do not support SSH script I/O")
                     }
                     #else
                     return .connectFailure("SSHScriptRunner is only available on macOS")

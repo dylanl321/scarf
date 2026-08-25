@@ -54,11 +54,14 @@ public struct SSHConfig: Sendable, Hashable, Codable {
 }
 
 /// Distinguishes a local installation (the user's own `~/.hermes`) from a
-/// remote one reached over SSH. Service behavior is identical in shape but
-/// dispatches to different I/O primitives in Phase 2.
+/// remote one reached over SSH, or a remote `hermes serve` HTTP+WebSocket
+/// endpoint. File/CLI services still dispatch through `ServerTransport`
+/// for `.local` / `.ssh`. `.serve` is typed REST + TUI-gateway chat and
+/// must not be emulated as SSH.
 public enum ServerKind: Sendable, Hashable, Codable {
     case local
     case ssh(SSHConfig)
+    case serve(HermesServeConfig)
 }
 
 /// The per-server value that flows through `.environment` and gets handed to
@@ -118,12 +121,38 @@ public struct ServerContext: Sendable, Hashable, Identifiable {
                 isRemote: true,
                 binaryHint: config.hermesBinaryHint
             )
+        case .serve(let config):
+            // Serve has no filesystem. Derived paths stay plausible so
+            // accidental readers don't crash; I/O still fails via
+            // `ServeUnavailableTransport`.
+            let base = HermesPathSet.defaultRemoteHome
+            let home: String
+            if let profile = config.profile, !profile.isEmpty, profile != "default" {
+                home = HermesProfileScope.resolveHome(baseHome: base, profile: profile)
+            } else {
+                home = base
+            }
+            return HermesPathSet(home: home, isRemote: true, binaryHint: nil)
         }
     }
 
     public nonisolated var isRemote: Bool {
-        if case .ssh = kind { return true }
+        switch kind {
+        case .local: return false
+        case .ssh, .serve: return true
+        }
+    }
+
+    /// `true` when this context talks to `hermes serve` over HTTP+WS.
+    public nonisolated var isServe: Bool {
+        if case .serve = kind { return true }
         return false
+    }
+
+    /// Serve connection parameters when `kind == .serve`.
+    public nonisolated var serveConfig: HermesServeConfig? {
+        if case .serve(let config) = kind { return config }
+        return nil
     }
 
     /// Default parent directory under which `ProjectTemplateInstaller` lays
@@ -143,6 +172,8 @@ public struct ServerContext: Sendable, Hashable, Identifiable {
                !configured.trimmingCharacters(in: .whitespaces).isEmpty {
                 return configured
             }
+            return "~/projects"
+        case .serve:
             return "~/projects"
         }
     }
@@ -169,6 +200,8 @@ public struct ServerContext: Sendable, Hashable, Identifiable {
                 return factory(id, config, displayName)
             }
             return SSHTransport(contextID: id, config: config, displayName: displayName)
+        case .serve:
+            return ServeUnavailableTransport(contextID: id)
         }
     }
 
@@ -252,15 +285,32 @@ public extension ServerContext {
     /// nests `profiles/<a>/profiles/<b>` even if the stored `remoteHome`
     /// already pointed at a named profile.
     nonisolated func scoped(toProfile profile: String?) -> ServerContext {
-        guard case .ssh(var config) = kind else { return self }
-        let base = config.remoteHome ?? HermesPathSet.defaultRemoteHome
-        let root = HermesProfileScope.rootHome(forHome: base)
-        let scopedHome = HermesProfileScope.resolveHome(baseHome: root, profile: profile)
-        guard scopedHome != base else { return self }
-        config.remoteHome = scopedHome
-        var copy = self
-        copy.kind = .ssh(config)
-        return copy
+        switch kind {
+        case .local:
+            return self
+        case .ssh(var config):
+            let base = config.remoteHome ?? HermesPathSet.defaultRemoteHome
+            let root = HermesProfileScope.rootHome(forHome: base)
+            let scopedHome = HermesProfileScope.resolveHome(baseHome: root, profile: profile)
+            guard scopedHome != base else { return self }
+            config.remoteHome = scopedHome
+            var copy = self
+            copy.kind = .ssh(config)
+            return copy
+        case .serve(var config):
+            let trimmed = profile?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let next: String?
+            if let trimmed, !trimmed.isEmpty, trimmed != "default" {
+                next = trimmed
+            } else {
+                next = nil
+            }
+            guard config.profile != next else { return self }
+            config.profile = next
+            var copy = self
+            copy.kind = .serve(config)
+            return copy
+        }
     }
 }
 
@@ -292,6 +342,7 @@ private actor UserHomeCache {
 
     private func probe(context: ServerContext) async -> String {
         if !context.isRemote { return NSHomeDirectory() }
+        if context.isServe { return "~" }
         let transport = context.makeTransport()
         let result = try? transport.runProcess(
             executable: "/bin/sh",
