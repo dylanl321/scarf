@@ -60,6 +60,11 @@ xcodebuild \
 
 log "Building unsigned $CONFIG $SCHEME for generic iOS"
 mkdir -p "$DERIVED_DATA" "$OUT_DIR"
+XCODEBUILD_EXTRA=()
+if [[ -n "${IOS_BUILD_NUMBER:-}" ]]; then
+  log "Using CI build number $IOS_BUILD_NUMBER as CFBundleVersion"
+  XCODEBUILD_EXTRA+=(CURRENT_PROJECT_VERSION="$IOS_BUILD_NUMBER")
+fi
 xcodebuild \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
@@ -74,6 +79,7 @@ xcodebuild \
   ENABLE_PREVIEWS=NO \
   ENABLE_CODE_COVERAGE=NO \
   CLANG_ENABLE_CODE_COVERAGE=NO \
+  "${XCODEBUILD_EXTRA[@]}" \
   build
 
 APP_PATH="$DERIVED_DATA/Build/Products/${CONFIG}-iphoneos/scarf mobile.app"
@@ -104,5 +110,27 @@ rm -f "$IPA_PATH"
 ditto -c -k --norsrc --keepParent "$STAGE/Payload" "$IPA_PATH"
 
 [[ -f "$IPA_PATH" ]] || die "IPA was not written"
+STABLE_IPA="$OUT_DIR/ScarfGo.ipa"
+cp "$IPA_PATH" "$STABLE_IPA"
+if stat -f%z "$IPA_PATH" >/dev/null 2>&1; then
+  IPA_SIZE="$(stat -f%z "$IPA_PATH")"
+else
+  IPA_SIZE="$(stat -c%s "$IPA_PATH")"
+fi
+python3 - "$OUT_DIR/ipa-meta.json" "$VERSION" "$BUILD" "$IPA_PATH" "$STABLE_IPA" "$IPA_SIZE" <<'PY'
+import json, os, sys
+out, version, build, ipa, stable, size = sys.argv[1:7]
+payload = {
+    "version": version,
+    "build": str(build),
+    "ipa": os.path.abspath(ipa),
+    "ipaName": os.path.basename(ipa),
+    "ipaStable": os.path.abspath(stable),
+    "size": int(size),
+}
+with open(out, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2)
+    fh.write("\n")
+PY
 log "IPA ready: $IPA_PATH ($(du -h "$IPA_PATH" | awk '{print $1}'))"
 printf '%s\n' "$IPA_PATH"

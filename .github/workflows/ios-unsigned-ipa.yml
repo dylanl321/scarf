@@ -1,17 +1,28 @@
-# Builds an unsigned device IPA for scarf mobile (ScarfGo) and uploads it
-# as a workflow artifact. No Apple Developer account or signing secrets.
+# Builds an unsigned device IPA for scarf mobile (ScarfGo), publishes it to a
+# rolling GitHub Release, and writes an AltStore / Feather source JSON.
+# No Apple Developer account or signing secrets.
 #
-# The IPA will not install on a stock iPhone until a sideloading tool
-# re-signs it. This job only produces the archive.
+# Add this source URL in AltStore or Feather:
+#   https://github.com/<owner>/<repo>/releases/download/scarfgo-sideload/source.json
+#
+# The IPA will not install on a stock iPhone until AltStore or Feather
+# re-signs it. This job only produces the archive and the source.
 
 name: Unsigned iOS IPA
 
 on:
   workflow_dispatch:
   pull_request:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'altstore/**'
+      - 'README.md'
+      - 'wiki/**'
+      - 'documents/**'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ios-unsigned-ipa-${{ github.workflow }}-${{ github.ref }}
@@ -34,12 +45,48 @@ jobs:
       - name: Package unsigned IPA
         env:
           NSUnbufferedIO: YES
+          IOS_BUILD_NUMBER: ${{ github.run_number }}
         run: ./scripts/package-ios-ipa.sh
 
-      - name: Upload IPA
+      - name: Write AltStore / Feather source
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 scripts/write-sideload-source.py \
+            --meta build/ipa-meta.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag scarfgo-sideload \
+            --ref "${{ github.event.repository.default_branch }}" \
+            --output altstore/source.json \
+            --notes "Unsigned ScarfGo ${{ github.sha }} (run ${{ github.run_number }})."
+
+      - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: ScarfGo-unsigned-ipa
-          path: build/*.ipa
+          path: |
+            build/*.ipa
+            altstore/source.json
+            build/ipa-meta.json
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish sideload release
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: scarfgo-sideload
+          name: ScarfGo unsigned (AltStore / Feather)
+          prerelease: true
+          make_latest: false
+          body: |
+            Rolling unsigned ScarfGo IPA for AltStore and Feather.
+
+            **Source URL** (paste this in AltStore or Feather):
+            https://github.com/${{ github.repository }}/releases/download/scarfgo-sideload/source.json
+
+            AltStore and Feather re-sign this IPA with your own certificate. It will not install on a stock iPhone by itself.
+          files: |
+            build/ScarfGo.ipa
+            build/ScarfGo-*-unsigned.ipa
+            altstore/source.json
