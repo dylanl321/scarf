@@ -1,0 +1,45 @@
+# Builds an unsigned device IPA for scarf mobile (ScarfGo) and uploads it
+# as a workflow artifact. No Apple Developer account or signing secrets.
+#
+# The IPA will not install on a stock iPhone until a sideloading tool
+# re-signs it. This job only produces the archive.
+
+name: Unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-unsigned-ipa-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-26
+    timeout-minutes: 75
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcode-select -p
+
+      - name: Package unsigned IPA
+        env:
+          NSUnbufferedIO: YES
+        run: ./scripts/package-ios-ipa.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScarfGo-unsigned-ipa
+          path: build/*.ipa
+          if-no-files-found: error
+          retention-days: 14
