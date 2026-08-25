@@ -155,7 +155,8 @@ final class AddServerViewModel {
             if status.advertisedAuthMode == .basic {
                 try await client.loginBasic(
                     username: serveUsername.trimmingCharacters(in: .whitespaces),
-                    password: servePassword
+                    password: servePassword,
+                    provider: status.passwordLoginProvider
                 )
             }
             testResult = .success(

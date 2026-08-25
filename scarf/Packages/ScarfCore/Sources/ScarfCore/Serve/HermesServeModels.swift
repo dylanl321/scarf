@@ -26,6 +26,14 @@ public struct HermesServeStatus: Sendable, Hashable, Codable {
         (auth_required ?? false) ? .basic : .sessionToken
     }
 
+    /// Provider id for `POST /auth/password-login`. Hermes requires this
+    /// field; the bundled dashboard plugin is `basic`.
+    public var passwordLoginProvider: String {
+        let names = (auth_providers ?? []).filter { !$0.isEmpty }
+        if names.contains("basic") { return "basic" }
+        return names.first ?? "basic"
+    }
+
     /// Best-effort version line for `HermesCapabilities.parse`.
     public var versionLineForCapabilities: String {
         if let version, version.contains("Hermes Agent v") { return version }
@@ -163,8 +171,8 @@ public enum HermesServeError: Error, LocalizedError, Equatable, Sendable {
         switch self {
         case .invalidURL(let s):
             return "Invalid Hermes URL: \(s)"
-        case .httpStatus(let code, let body):
-            return "Hermes serve returned HTTP \(code). \(body)"
+        case .httpStatus(let code, _):
+            return Self.userFacingHTTPMessage(code)
         case .unauthorized:
             return "Hermes serve rejected the credentials. Check username and password."
         case .decoding(let msg):
@@ -175,6 +183,24 @@ public enum HermesServeError: Error, LocalizedError, Equatable, Sendable {
             return "Hermes URL connections do not support SSH file or process I/O."
         case .websocket(let msg):
             return "Hermes chat WebSocket failed: \(msg)"
+        }
+    }
+
+    /// Never put server response bodies here — auth 422s echo the password.
+    static func userFacingHTTPMessage(_ code: Int) -> String {
+        switch code {
+        case -1:
+            return "Couldn't read the Hermes serve response."
+        case 404:
+            return "Hermes serve didn't recognize that login method."
+        case 422:
+            return "Hermes rejected the login request. Check username and password."
+        case 429:
+            return "Too many login attempts. Wait a minute and retry."
+        case 503:
+            return "Hermes auth is temporarily unavailable."
+        default:
+            return "Couldn't reach Hermes serve (HTTP \(code))."
         }
     }
 }

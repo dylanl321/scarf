@@ -48,9 +48,14 @@ public actor HermesServeClient {
         return status
     }
 
-    public func loginBasic(username: String, password: String) async throws {
+    public func loginBasic(username: String, password: String, provider: String? = nil) async throws {
+        let resolved = provider.flatMap { $0.isEmpty ? nil : $0 } ?? "basic"
         let body = try JSONSerialization.data(
-            withJSONObject: ["username": username, "password": password]
+            withJSONObject: [
+                "provider": resolved,
+                "username": username,
+                "password": password,
+            ]
         )
         _ = try await request(
             path: "/auth/password-login",
@@ -217,7 +222,7 @@ public actor HermesServeClient {
                 secret = ""
             }
             let user = username ?? config.username ?? ""
-            try await loginBasic(username: user, password: secret)
+            try await loginBasic(username: user, password: secret, provider: status.passwordLoginProvider)
         }
     }
 
@@ -295,9 +300,7 @@ public actor HermesServeClient {
         if http.statusCode == 401 { throw HermesServeError.unauthorized }
         if (200...299).contains(http.statusCode) { return data }
         if acceptRedirect, (300...399).contains(http.statusCode) { return data }
-        let snippet = String(data: data, encoding: .utf8) ?? ""
-        let clipped = String(snippet.prefix(200))
-        throw HermesServeError.httpStatus(http.statusCode, clipped)
+        throw HermesServeError.httpStatus(http.statusCode, "")
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {

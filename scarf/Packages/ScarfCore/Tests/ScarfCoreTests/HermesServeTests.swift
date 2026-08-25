@@ -95,6 +95,22 @@ import Foundation
         #expect(line.contains("0.20.4"))
     }
 
+    @Test func passwordLoginProviderPrefersBasic() {
+        #expect(HermesServeStatus(auth_required: true).passwordLoginProvider == "basic")
+        #expect(HermesServeStatus(auth_providers: ["nous", "basic"]).passwordLoginProvider == "basic")
+        #expect(HermesServeStatus(auth_providers: ["ldap"]).passwordLoginProvider == "ldap")
+    }
+
+    @Test func httpErrorDoesNotShowResponseBody() {
+        let raw = #"{"detail":[{"input":{"password":"secret","username":"admin"}}]}"#
+        let shown = HermesServeError.httpStatus(422, raw).errorDescription ?? ""
+        #expect(!shown.contains("secret"))
+        #expect(!shown.contains("admin"))
+        #expect(!shown.contains("password"))
+        #expect(!shown.contains("{"))
+        #expect(shown.contains("rejected the login"))
+    }
+
     @Test func sessionDTOMapsToHermesSession() {
         let dto = HermesServeSessionDTO(
             id: "s1",
@@ -164,6 +180,27 @@ import Foundation
         #expect(status.session_token == "t")
     }
 
+    @Test func serveClientPasswordLoginSendsProvider() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            if request.url?.path == "/auth/password-login" {
+                let body = ServeURLProtocol.bodyString(of: request)
+                #expect(body.contains("\"provider\""))
+                #expect(body.contains("basic"))
+                #expect(body.contains("admin"))
+                return (200, Data(#"{"ok":true}"#.utf8))
+            }
+            if request.url?.path == "/api/auth/me" {
+                return (200, Data(#"{"provider":"basic","user_id":"admin"}"#.utf8))
+            }
+            return (500, Data())
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        try await client.loginBasic(username: "admin", password: "unused-test-secret")
+    }
+
     @Test func serveClientUnauthorizedLogin() async {
         let session = ServeURLProtocol.makeSession(handler: { request in
             if request.url?.path == "/auth/password-login" {
@@ -222,6 +259,25 @@ private final class ServeURLProtocol: URLProtocol, @unchecked Sendable {
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    static func bodyString(of request: URLRequest) -> String {
+        if let data = request.httpBody, !data.isEmpty {
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+        guard let stream = request.httpBodyStream else { return "" }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufSize = 1024
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+        defer { buf.deallocate() }
+        while stream.hasBytesAvailable {
+            let n = stream.read(buf, maxLength: bufSize)
+            if n <= 0 { break }
+            data.append(buf, count: n)
+        }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
 
     override func startLoading() {
         let (code, data) = Self.handler?(request) ?? (500, Data())
