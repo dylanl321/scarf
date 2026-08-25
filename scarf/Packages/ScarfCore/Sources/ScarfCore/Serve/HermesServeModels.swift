@@ -113,7 +113,7 @@ public struct HermesServeSessionDTO: Sendable, Hashable, Codable {
 
 /// Paginated `GET /api/sessions` envelope. Bare arrays still decode
 /// via `HermesServeClient.listSessionPage` with `total = count`.
-public struct HermesServeSessionPage: Sendable, Hashable {
+public struct HermesServeSessionPage: Sendable {
     public var sessions: [HermesSession]
     public var total: Int
     public var limit: Int
