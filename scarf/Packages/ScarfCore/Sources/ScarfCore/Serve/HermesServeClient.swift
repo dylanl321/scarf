@@ -89,7 +89,14 @@ public actor HermesServeClient {
         }
         switch config.authMode {
         case .sessionToken:
-            if let token = sessionToken ?? (try? await fetchStatus())?.session_token {
+            // `??` is an autoclosure and cannot contain `await`.
+            let token: String?
+            if let existing = sessionToken {
+                token = existing
+            } else {
+                token = (try? await fetchStatus())?.session_token
+            }
+            if let token {
                 items.append(URLQueryItem(name: "token", value: token))
             }
         case .basic:
@@ -201,9 +208,14 @@ public actor HermesServeClient {
             }
         case .basic:
             let store = HermesServeRuntime.credentials
-            let secret = try await store.load(for: serverID)
-                ?? (try await store.load(fingerprint: config.fingerprint))
-                ?? ""
+            let secret: String
+            if let loaded = try await store.load(for: serverID) {
+                secret = loaded
+            } else if let loaded = try await store.load(fingerprint: config.fingerprint) {
+                secret = loaded
+            } else {
+                secret = ""
+            }
             let user = username ?? config.username ?? ""
             try await loginBasic(username: user, password: secret)
         }

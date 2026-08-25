@@ -72,6 +72,8 @@ xcodebuild \
   CODE_SIGN_IDENTITY="" \
   DEVELOPMENT_TEAM="" \
   ENABLE_PREVIEWS=NO \
+  ENABLE_CODE_COVERAGE=NO \
+  CLANG_ENABLE_CODE_COVERAGE=NO \
   build
 
 APP_PATH="$DERIVED_DATA/Build/Products/${CONFIG}-iphoneos/scarf mobile.app"
