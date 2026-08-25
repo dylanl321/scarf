@@ -156,7 +156,7 @@ private struct ServeDetailsStep: View {
 
     var body: some View {
         Form {
-            Section("Hermes URL") {
+            Section {
                 TextField("http://host:9119", text: Bindable(vm).serveURL)
                     .textContentType(.URL)
                     .keyboardType(.URL)
@@ -170,6 +170,8 @@ private struct ServeDetailsStep: View {
                     .textContentType(.password)
                 TextField("nickname (optional)", text: Bindable(vm).displayName)
                     .autocorrectionDisabled()
+            } header: {
+                Text("Hermes URL")
             } footer: {
                 Text("The host must be running `hermes serve --host 0.0.0.0` (Hermes 0.18+). Scarf will call GET /api/status, then log in if the dashboard requires it.")
             }
