@@ -111,6 +111,24 @@ public struct HermesServeSessionDTO: Sendable, Hashable, Codable {
     }
 }
 
+/// Paginated `GET /api/sessions` envelope. Bare arrays still decode
+/// via `HermesServeClient.listSessionPage` with `total = count`.
+public struct HermesServeSessionPage: Sendable, Hashable {
+    public var sessions: [HermesSession]
+    public var total: Int
+    public var limit: Int
+    public var offset: Int
+
+    public init(sessions: [HermesSession], total: Int, limit: Int, offset: Int) {
+        self.sessions = sessions
+        self.total = total
+        self.limit = limit
+        self.offset = offset
+    }
+
+    public var hasMore: Bool { offset + sessions.count < total }
+}
+
 public struct HermesServeCronJobDTO: Sendable, Hashable, Codable {
     public var id: String
     public var name: String?
@@ -192,6 +210,7 @@ public struct HermesServeKanbanLogDTO: Sendable, Hashable, Codable {
 
 public struct HermesServeWebhookListDTO: Sendable, Hashable, Codable {
     public var enabled: Bool?
+    public var base_url: String?
     public var subscriptions: [HermesServeWebhookDTO]?
 }
 
@@ -201,6 +220,8 @@ public struct HermesServeWebhookDTO: Sendable, Hashable, Codable {
     public var events: [String]?
     public var deliver: String?
     public var url: String?
+    public var script: String?
+    public var secret: String?
 }
 
 public struct HermesServeProfileDTO: Sendable, Hashable, Codable {

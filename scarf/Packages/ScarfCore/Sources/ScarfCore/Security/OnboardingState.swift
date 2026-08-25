@@ -9,7 +9,10 @@ import Foundation
 /// .chooseConnection ─▶  .serverDetails   (user picks SSH)
 ///                   ─▶  .serveDetails    (user picks Hermes URL)
 /// .serveDetails     ─▶  .testConnection  (GET /api/status + optional login)
+///                   ─▶  .companionSSHOffer (optional SSH for files)
 ///                   ─▶  .connected
+/// .companionSSHOffer─▶  .keySource (same SSH key flow, then merge)
+/// ```
 /// .serverDetails  ─▶  .keySource        (user taps "Next")
 /// .keySource      ─▶  .generate         (user picks "Create new key")
 ///                 ─▶  .importKey        (user picks "Import existing key")
@@ -24,6 +27,7 @@ import Foundation
 public enum OnboardingStep: Sendable, Equatable {
     case chooseConnection
     case serveDetails
+    case companionSSHOffer
     case serverDetails
     case keySource
     case generate

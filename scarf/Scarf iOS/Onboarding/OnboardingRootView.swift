@@ -35,17 +35,22 @@ struct OnboardingRootView: View {
     /// into onboarding, so the button looked broken to TestFlight
     /// users.
     let canCancel: Bool
+    /// When set, skip the connection chooser and attach companion SSH
+    /// to this existing Hermes URL row.
+    var attachCompanionTo: IOSServerConfig? = nil
 
     @State private var vm: OnboardingViewModel
 
     init(
         targetServerID: ServerID,
         canCancel: Bool = true,
+        attachCompanionTo: IOSServerConfig? = nil,
         onFinished: @escaping @MainActor () async -> Void,
         onCancel: @escaping @MainActor () -> Void = {}
     ) {
         self.targetServerID = targetServerID
         self.canCancel = canCancel
+        self.attachCompanionTo = attachCompanionTo
         self.onFinished = onFinished
         self.onCancel = onCancel
         let service = CitadelSSHService()
@@ -65,6 +70,7 @@ struct OnboardingRootView: View {
                 switch vm.step {
                 case .chooseConnection: ChooseConnectionStep(vm: vm)
                 case .serveDetails:    ServeDetailsStep(vm: vm)
+                case .companionSSHOffer: CompanionSSHOfferStep(vm: vm)
                 case .serverDetails:   ServerDetailsStep(vm: vm)
                 case .keySource:       KeySourceStep(vm: vm)
                 case .generate:        GenerateKeyStep(vm: vm)
@@ -105,6 +111,18 @@ struct OnboardingRootView: View {
         .onChange(of: vm.step) { _, new in
             if case .connected = new {
                 Task { await onFinished() }
+            } else if case .testFailed(let reason) = new {
+                ScarfGoDebug.record(
+                    kind: .login,
+                    code: vm.connectionKind == .serve ? "serve-login" : "ssh-connect",
+                    message: reason,
+                    config: nil
+                )
+            }
+        }
+        .onAppear {
+            if let attachCompanionTo {
+                vm.startAttachingCompanion(to: attachCompanionTo)
             }
         }
     }
@@ -198,6 +216,41 @@ private struct ServeDetailsStep: View {
     }
 }
 
+private struct CompanionSSHOfferStep: View {
+    let vm: OnboardingViewModel
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Text("Add SSH for files?")
+                .font(.title2)
+                .bold()
+            Text("Chat, Kanban, and Cron already work over the Hermes URL. Memory, Projects, Plugins, and Curator still need SSH. You can skip this and add it later from System.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(ScarfColor.foregroundMuted)
+                .padding(.horizontal)
+
+            VStack(spacing: 12) {
+                Button {
+                    vm.startCompanionSSH()
+                } label: {
+                    Label("Add SSH for files", systemImage: "key.fill")
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                }
+                .buttonStyle(ScarfPrimaryButton())
+
+                Button("Skip for now") {
+                    vm.skipCompanionSSH()
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding()
+            Spacer()
+        }
+        .padding(.top)
+    }
+}
+
 private struct ServerDetailsStep: View {
     let vm: OnboardingViewModel
 
@@ -219,7 +272,13 @@ private struct ServerDetailsStep: View {
             }
 
             Section {
-                Button("Back") { vm.goBackToChooser() }
+                Button("Back") {
+                    if vm.attachingCompanion {
+                        vm.cancelCompanionSSH()
+                    } else {
+                        vm.goBackToChooser()
+                    }
+                }
                 Button {
                     vm.advanceFromServerDetails()
                 } label: {
@@ -389,9 +448,11 @@ private struct TestConnectionStep: View {
         VStack(spacing: 16) {
             ProgressView()
                 .scaleEffect(1.2)
-            Text(vm.connectionKind == .serve
-                 ? "Testing Hermes URL…"
-                 : "Testing connection to \(vm.host)…")
+            Text(vm.attachingCompanion
+                 ? "Testing SSH to \(vm.host)…"
+                 : (vm.connectionKind == .serve
+                    ? "Testing Hermes URL…"
+                    : "Testing connection to \(vm.host)…"))
                 .foregroundStyle(ScarfColor.foregroundMuted)
         }
     }

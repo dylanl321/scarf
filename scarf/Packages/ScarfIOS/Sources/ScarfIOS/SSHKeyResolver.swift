@@ -51,9 +51,23 @@ public enum SSHKeyResolver {
         let entries = (try? await configStore.listAll()) ?? [:]
         let matchingIDs = entries
             .filter { _, entry in
-                entry.host == config.host
-                    && (entry.port ?? 22) == (config.port ?? 22)
-                    && (entry.user ?? "root") == (config.user ?? "root")
+                let sshHost: String
+                let sshPort: Int
+                let sshUser: String
+                if entry.hasCompanionSSH, let companion = entry.companionHost {
+                    sshHost = companion
+                    sshPort = entry.companionPort ?? 22
+                    sshUser = entry.companionUser ?? "root"
+                } else if !entry.isServe {
+                    sshHost = entry.host
+                    sshPort = entry.port ?? 22
+                    sshUser = entry.user ?? "root"
+                } else {
+                    return false
+                }
+                return sshHost == config.host
+                    && sshPort == (config.port ?? 22)
+                    && sshUser == (config.user ?? "root")
             }
             .keys
             .sorted { $0.uuidString < $1.uuidString }

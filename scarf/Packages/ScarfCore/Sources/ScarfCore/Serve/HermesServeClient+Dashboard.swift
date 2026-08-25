@@ -103,19 +103,6 @@ extension HermesServeClient {
         queryPath(path, items)
     }
 
-    private func queryPath(_ path: String, _ items: [String: String?]) -> String {
-        var comps = URLComponents()
-        comps.path = path
-        let queryItems = items.compactMap { key, value -> URLQueryItem? in
-            guard let value, !value.isEmpty else { return nil }
-            return URLQueryItem(name: key, value: value)
-        }
-        if !queryItems.isEmpty {
-            comps.queryItems = queryItems
-        }
-        return comps.string ?? path
-    }
-
     private func encodedPath(_ raw: String) -> String {
         raw.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? raw
     }

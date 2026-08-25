@@ -19,6 +19,10 @@ public nonisolated let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructo
 
 public enum QueryDefaults: Sendable {
     public nonisolated static let sessionLimit = 100
+    /// First Dashboard Sessions page and each "Load more" fetch.
+    public nonisolated static let dashboardSessionPageSize = 100
+    /// Overview glance list on the iOS Dashboard.
+    public nonisolated static let dashboardOverviewCount = 5
     public nonisolated static let messageSearchLimit = 50
     public nonisolated static let toolCallLimit = 50
     public nonisolated static let sessionPreviewLimit = 10

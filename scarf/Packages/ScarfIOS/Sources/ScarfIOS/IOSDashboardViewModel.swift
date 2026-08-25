@@ -28,14 +28,20 @@ public final class IOSDashboardViewModel {
     // MARK: - Published state
 
     public var stats: HermesDataService.SessionStats = .empty
-    /// Recent 5 sessions for the Overview sub-tab (glance-only surface).
+    /// Recent sessions for the Overview sub-tab (glance-only surface).
     public var recentSessions: [HermesSession] = []
-    /// Deeper session list for the Sessions sub-tab — larger window +
-    /// filterable by project. Default 25; enough to cover "what did I
-    /// work on this week" without paging.
+    /// Session list for the Sessions sub-tab. First page is
+    /// `QueryDefaults.dashboardSessionPageSize`; "Load more" appends.
     public var allSessions: [HermesSession] = []
     public var sessionPreviews: [String: String] = [:]
     public var isLoading: Bool = true
+    public var isLoadingMore: Bool = false
+    /// Total listable sessions reported by the host (serve envelope or
+    /// SQLite COUNT with the same list predicate).
+    public var totalSessionCount: Int = 0
+    public var hasMoreSessions: Bool {
+        allSessions.count < totalSessionCount
+    }
 
     /// session-id → project display name, for sessions attributed to
     /// a registered Scarf project. Populated in `load()` by a single
@@ -77,9 +83,15 @@ public final class IOSDashboardViewModel {
 
         await ScarfMon.measureAsync(.sessionLoad, "ios.loadDashboard") {
             stats = await dataService.fetchStats()
-            recentSessions = await dataService.fetchSessions(limit: 5)
-            allSessions = await dataService.fetchSessions(limit: 25)
-            sessionPreviews = await dataService.fetchSessionPreviews(limit: 25)
+            totalSessionCount = await dataService.fetchSessionListTotal()
+            allSessions = await dataService.fetchSessions(
+                limit: QueryDefaults.dashboardSessionPageSize,
+                offset: 0
+            )
+            recentSessions = Array(allSessions.prefix(QueryDefaults.dashboardOverviewCount))
+            sessionPreviews = await dataService.fetchSessionPreviews(
+                limit: QueryDefaults.dashboardSessionPageSize
+            )
         }
         ScarfMon.event(.sessionLoad, "ios.allSessions.count", count: allSessions.count)
 
@@ -121,25 +133,29 @@ public final class IOSDashboardViewModel {
         do {
             let client = HermesServeClient(config: cfg)
             try await client.authenticate(serverID: context.id, username: cfg.username)
-            let sessions = try await client.listSessions()
-            allSessions = Array(sessions.prefix(25))
-            recentSessions = Array(sessions.prefix(5))
+            let page = try await client.listSessionPage(
+                limit: QueryDefaults.dashboardSessionPageSize,
+                offset: 0
+            )
+            allSessions = page.sessions
+            recentSessions = Array(page.sessions.prefix(QueryDefaults.dashboardOverviewCount))
+            totalSessionCount = page.total
             var previews: [String: String] = [:]
-            for session in sessions {
+            for session in page.sessions {
                 if let preview = session.lastActivityDescription {
                     previews[session.id] = preview
                 }
             }
             sessionPreviews = previews
             stats = HermesDataService.SessionStats(
-                totalSessions: sessions.count,
-                totalMessages: sessions.reduce(0) { $0 + $1.messageCount },
-                totalToolCalls: sessions.reduce(0) { $0 + $1.toolCallCount },
-                totalInputTokens: sessions.reduce(0) { $0 + $1.inputTokens },
-                totalOutputTokens: sessions.reduce(0) { $0 + $1.outputTokens },
-                totalCostUSD: sessions.reduce(0) { $0 + ($1.estimatedCostUSD ?? 0) },
-                totalReasoningTokens: sessions.reduce(0) { $0 + $1.reasoningTokens },
-                totalActualCostUSD: sessions.reduce(0) { $0 + ($1.actualCostUSD ?? 0) }
+                totalSessions: page.total,
+                totalMessages: page.sessions.reduce(0) { $0 + $1.messageCount },
+                totalToolCalls: page.sessions.reduce(0) { $0 + $1.toolCallCount },
+                totalInputTokens: page.sessions.reduce(0) { $0 + $1.inputTokens },
+                totalOutputTokens: page.sessions.reduce(0) { $0 + $1.outputTokens },
+                totalCostUSD: page.sessions.reduce(0) { $0 + ($1.estimatedCostUSD ?? 0) },
+                totalReasoningTokens: page.sessions.reduce(0) { $0 + $1.reasoningTokens },
+                totalActualCostUSD: page.sessions.reduce(0) { $0 + ($1.actualCostUSD ?? 0) }
             )
             sessionProjectNames = [:]
             allProjects = []
@@ -150,11 +166,8 @@ public final class IOSDashboardViewModel {
     }
 
     /// Sessions matching the given project filter. `nil` returns
-    /// all 25 recent sessions (no filtering). `projectName` is the
-    /// ProjectEntry.name that's the key in `sessionProjectNames`, so
-    /// the filter is an O(n) dict lookup per session — cheap at our
-    /// 25-session window. Sorting is preserved (newest first) from
-    /// the upstream `fetchSessions(limit:)` query.
+    /// every loaded session (no filtering). `projectName` is the
+    /// ProjectEntry.name that's the key in `sessionProjectNames`.
     public func sessions(filteredBy projectName: String?) -> [HermesSession] {
         guard let projectName, !projectName.isEmpty else { return allSessions }
         return allSessions.filter { session in
@@ -173,6 +186,61 @@ public final class IOSDashboardViewModel {
     public func refresh() async {
         ScarfMon.event(.sessionLoad, "ios.dashboardRefresh.trigger", count: 1)
         await load()
+    }
+
+    /// Next page for the Sessions tab. No-op when already loading or
+    /// when the host says there is nothing left.
+    public func loadMoreSessions() async {
+        guard hasMoreSessions, !isLoadingMore, !isLoading else { return }
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+        let offset = allSessions.count
+        if context.isServe {
+            await loadMoreFromServe(offset: offset)
+            return
+        }
+        let opened = await dataService.refresh()
+        guard opened else { return }
+        let page = await dataService.fetchSessions(
+            limit: QueryDefaults.dashboardSessionPageSize,
+            offset: offset
+        )
+        let extraPreviews = await dataService.fetchSessionPreviews(
+            limit: offset + page.count
+        )
+        await dataService.close()
+        appendSessions(page)
+        for (id, preview) in extraPreviews where sessionPreviews[id] == nil {
+            sessionPreviews[id] = preview
+        }
+    }
+
+    private func loadMoreFromServe(offset: Int) async {
+        guard let cfg = context.serveConfig else { return }
+        do {
+            let client = HermesServeClient(config: cfg)
+            try await client.authenticate(serverID: context.id, username: cfg.username)
+            let page = try await client.listSessionPage(
+                limit: QueryDefaults.dashboardSessionPageSize,
+                offset: offset
+            )
+            totalSessionCount = page.total
+            appendSessions(page.sessions)
+            for session in page.sessions {
+                if let preview = session.lastActivityDescription, sessionPreviews[session.id] == nil {
+                    sessionPreviews[session.id] = preview
+                }
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func appendSessions(_ page: [HermesSession]) {
+        let seen = Set(allSessions.map(\.id))
+        let fresh = page.filter { !seen.contains($0.id) }
+        allSessions.append(contentsOf: fresh)
+        ScarfMon.event(.sessionLoad, "ios.allSessions.count", count: allSessions.count)
     }
 }
 

@@ -116,16 +116,46 @@ public actor HermesServeClient {
     }
 
     public func listSessions() async throws -> [HermesSession] {
-        let data = try await get(path: "/api/sessions", authenticated: true)
+        try await listSessionPage().sessions
+    }
+
+    /// `GET /api/sessions?limit=&offset=&order=recent`. Hermes caps
+    /// `limit` at 100. Older servers that return a bare array still
+    /// decode; `total` then equals the page count.
+    public func listSessionPage(
+        limit: Int = QueryDefaults.dashboardSessionPageSize,
+        offset: Int = 0,
+        order: String = "recent"
+    ) async throws -> HermesServeSessionPage {
+        let path = queryPath("/api/sessions", [
+            "limit": String(min(max(limit, 1), 100)),
+            "offset": String(max(offset, 0)),
+            "order": order,
+        ])
+        let data = try await get(path: path, authenticated: true)
         if let array = try? decode([HermesServeSessionDTO].self, from: data) {
-            return array.map { $0.asHermesSession() }
+            let sessions = array.map { $0.asHermesSession() }
+            return HermesServeSessionPage(
+                sessions: sessions,
+                total: sessions.count,
+                limit: limit,
+                offset: offset
+            )
         }
-        // Some builds wrap the list.
         if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let raw = obj["sessions"] {
             let wrapped = try JSONSerialization.data(withJSONObject: raw)
             let array = try decode([HermesServeSessionDTO].self, from: wrapped)
-            return array.map { $0.asHermesSession() }
+            let sessions = array.map { $0.asHermesSession() }
+            let total = (obj["total"] as? Int)
+                ?? (obj["total"] as? NSNumber)?.intValue
+                ?? sessions.count
+            return HermesServeSessionPage(
+                sessions: sessions,
+                total: total,
+                limit: (obj["limit"] as? Int) ?? limit,
+                offset: (obj["offset"] as? Int) ?? offset
+            )
         }
         throw HermesServeError.decoding("sessions list")
     }
@@ -171,6 +201,78 @@ public actor HermesServeClient {
             method: "DELETE",
             body: nil,
             authenticated: true
+        )
+    }
+
+    /// `POST /api/cron/jobs`. Used by the ScarfGo debug-review wizard
+    /// (not a general cron editor).
+    @discardableResult
+    public func createCronJob(
+        name: String,
+        prompt: String,
+        schedule: String,
+        deliver: String = "local",
+        enabled: Bool = true
+    ) async throws -> Data {
+        let body = try JSONSerialization.data(
+            withJSONObject: [
+                "name": name,
+                "prompt": prompt,
+                "schedule": schedule,
+                "deliver": deliver,
+                "enabled": enabled,
+            ]
+        )
+        return try await request(
+            path: "/api/cron/jobs",
+            method: "POST",
+            body: body,
+            authenticated: true
+        )
+    }
+
+    public func enableWebhooks() async throws {
+        _ = try await request(
+            path: "/api/webhooks/enable",
+            method: "POST",
+            body: nil,
+            authenticated: true
+        )
+    }
+
+    @discardableResult
+    public func createWebhook(
+        name: String,
+        script: String?,
+        deliver: String,
+        secret: String?,
+        description: String? = nil
+    ) async throws -> HermesServeWebhookDTO {
+        var payload: [String: Any] = [
+            "name": name,
+            "deliver": deliver,
+        ]
+        if let script, !script.isEmpty { payload["script"] = script }
+        if let secret, !secret.isEmpty { payload["secret"] = secret }
+        if let description, !description.isEmpty { payload["description"] = description }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let data = try await request(
+            path: "/api/webhooks",
+            method: "POST",
+            body: body,
+            authenticated: true
+        )
+        if let dto = try? decode(HermesServeWebhookDTO.self, from: data) {
+            return dto
+        }
+        return HermesServeWebhookDTO(
+            name: name,
+            description: description,
+            events: nil,
+            deliver: deliver,
+            url: nil,
+            script: script,
+            secret: secret
         )
     }
 
@@ -322,5 +424,18 @@ public actor HermesServeClient {
         } catch {
             throw HermesServeError.decoding(error.localizedDescription)
         }
+    }
+
+    func queryPath(_ path: String, _ items: [String: String?]) -> String {
+        var comps = URLComponents()
+        comps.path = path
+        let queryItems = items.compactMap { key, value -> URLQueryItem? in
+            guard let value, !value.isEmpty else { return nil }
+            return URLQueryItem(name: key, value: value)
+        }
+        if !queryItems.isEmpty {
+            comps.queryItems = queryItems
+        }
+        return comps.string ?? path
     }
 }
