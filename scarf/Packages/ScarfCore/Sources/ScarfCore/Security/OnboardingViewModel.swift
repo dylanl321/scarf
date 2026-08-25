@@ -97,7 +97,7 @@ public final class OnboardingViewModel {
         let client = HermesServeClient(config: config)
         let status = try await client.probe()
         if status.advertisedAuthMode == .basic {
-            try await client.loginBasic(username: username, password: password)
+            try await client.loginBasic(username: username, password: password, provider: status.passwordLoginProvider)
         }
         return status
     }

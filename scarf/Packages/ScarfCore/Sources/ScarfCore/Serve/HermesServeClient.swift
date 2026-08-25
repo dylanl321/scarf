@@ -48,9 +48,14 @@ public actor HermesServeClient {
         return status
     }
 
-    public func loginBasic(username: String, password: String) async throws {
+    public func loginBasic(username: String, password: String, provider: String? = nil) async throws {
+        let resolved = provider.flatMap { $0.isEmpty ? nil : $0 } ?? "basic"
         let body = try JSONSerialization.data(
-            withJSONObject: ["username": username, "password": password]
+            withJSONObject: [
+                "provider": resolved,
+                "username": username,
+                "password": password,
+            ]
         )
         _ = try await request(
             path: "/auth/password-login",
@@ -217,7 +222,7 @@ public actor HermesServeClient {
                 secret = ""
             }
             let user = username ?? config.username ?? ""
-            try await loginBasic(username: user, password: secret)
+            try await loginBasic(username: user, password: secret, provider: status.passwordLoginProvider)
         }
     }
 

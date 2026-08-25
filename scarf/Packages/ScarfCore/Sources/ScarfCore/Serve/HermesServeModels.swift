@@ -26,6 +26,14 @@ public struct HermesServeStatus: Sendable, Hashable, Codable {
         (auth_required ?? false) ? .basic : .sessionToken
     }
 
+    /// Provider id for `POST /auth/password-login`. Hermes requires this
+    /// field; the bundled dashboard plugin is `basic`.
+    public var passwordLoginProvider: String {
+        let names = (auth_providers ?? []).filter { !$0.isEmpty }
+        if names.contains("basic") { return "basic" }
+        return names.first ?? "basic"
+    }
+
     /// Best-effort version line for `HermesCapabilities.parse`.
     public var versionLineForCapabilities: String {
         if let version, version.contains("Hermes Agent v") { return version }
@@ -164,7 +172,7 @@ public enum HermesServeError: Error, LocalizedError, Equatable, Sendable {
         case .invalidURL(let s):
             return "Invalid Hermes URL: \(s)"
         case .httpStatus(let code, let body):
-            return "Hermes serve returned HTTP \(code). \(body)"
+            return "Hermes serve returned HTTP \(code). \(Self.redactSecrets(in: body))"
         case .unauthorized:
             return "Hermes serve rejected the credentials. Check username and password."
         case .decoding(let msg):
@@ -176,5 +184,13 @@ public enum HermesServeError: Error, LocalizedError, Equatable, Sendable {
         case .websocket(let msg):
             return "Hermes chat WebSocket failed: \(msg)"
         }
+    }
+
+    /// Pydantic 422s echo the request body, including the password.
+    static func redactSecrets(in body: String) -> String {
+        let pattern = #""password"\s*:\s*"(?:\\.|[^"\\])*""#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return body }
+        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        return regex.stringByReplacingMatches(in: body, options: [], range: range, withTemplate: "\"password\":\"***\"")
     }
 }
