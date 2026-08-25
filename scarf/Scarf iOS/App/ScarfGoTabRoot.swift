@@ -7,7 +7,7 @@ import ScarfDesign
 /// 4-tab layout (Chat | Dashboard | Memory | More) to 5 primary tabs
 /// with Chat in the mathematical center:
 ///
-///     Dashboard | Projects | Chat | Skills | System
+///     Dashboard | Projects (or Kanban on Hermes URL) | Chat | Skills | System
 ///
 /// "Chat in the middle" is the v2.5 product ask — chat is the action
 /// users come back for, so it's the most thumb-reachable slot on a
@@ -144,19 +144,22 @@ struct ScarfGoTabRoot: View {
             // rename / archive happens in the Mac app.
             NavigationStack {
                 if cfg.isServe {
-                    ServeNeedsSSHPlaceholder(
-                        title: "Projects",
-                        message: "Projects, kanban, and AGENTS.md process-cwd need an SSH connection. This Hermes URL server only exposes the dashboard REST API."
-                    )
+                    ScarfGoKanbanView(project: nil, context: ctx)
+                        .navigationTitle("Kanban")
+                        .navigationBarTitleDisplayMode(.inline)
                 } else {
                     ProjectsListView(config: cfg)
                 }
             }
             .tabItem {
-                Label("Projects", systemImage: "square.grid.2x2")
+                if cfg.isServe {
+                    Label("Kanban", systemImage: "rectangle.split.3x1")
+                } else {
+                    Label("Projects", systemImage: "square.grid.2x2")
+                }
             }
             .tag(ScarfGoCoordinator.Tab.projects)
-            .accessibilityLabel("Projects tab")
+            .accessibilityLabel(cfg.isServe ? "Kanban tab" : "Projects tab")
 
             // 3 — Chat: the reason the app is on your phone. Centered
             // among the 5 tabs for thumb reach + visual prominence.
@@ -276,7 +279,7 @@ private struct SystemTab: View {
 
             Section("Features") {
                 if config.isServe {
-                    Label("Memory files need SSH", systemImage: "brain.head.profile")
+                    Label("MEMORY.md files need SSH", systemImage: "brain.head.profile")
                         .foregroundStyle(ScarfColor.foregroundMuted)
                         .scarfGoCompactListRow()
                         .listRowBackground(ScarfColor.backgroundSecondary)
@@ -319,13 +322,8 @@ private struct SystemTab: View {
                 .listRowBackground(ScarfColor.backgroundSecondary)
             }
 
-            // v2.6: read-only mobile views over CLI-driven Hermes
-            // surfaces. Mac owns the create/edit paths; phones get a
-            // monitoring window into what the remote agent is honoring.
-            // None of these are capability-gated — the underlying
-            // `hermes plugins/profile/webhook list` verbs exist on
-            // both v0.11 and v0.12, so the read views work on either.
-            if !config.isServe {
+            // Read-only inspect lists. Hermes URL uses dashboard REST for
+            // webhooks + profiles; plugin directory listing is still SSH.
             Section("Inspect") {
                 NavigationLink {
                     WebhooksView(config: config)
@@ -334,13 +332,20 @@ private struct SystemTab: View {
                 }
                 .scarfGoCompactListRow()
                 .listRowBackground(ScarfColor.backgroundSecondary)
-                NavigationLink {
-                    PluginsView(config: config)
-                } label: {
-                    Label("Plugins", systemImage: "app.badge.checkmark")
+                if config.isServe {
+                    Label("Plugin directory listing needs SSH", systemImage: "app.badge.checkmark")
+                        .foregroundStyle(ScarfColor.foregroundMuted)
+                        .scarfGoCompactListRow()
+                        .listRowBackground(ScarfColor.backgroundSecondary)
+                } else {
+                    NavigationLink {
+                        PluginsView(config: config)
+                    } label: {
+                        Label("Plugins", systemImage: "app.badge.checkmark")
+                    }
+                    .scarfGoCompactListRow()
+                    .listRowBackground(ScarfColor.backgroundSecondary)
                 }
-                .scarfGoCompactListRow()
-                .listRowBackground(ScarfColor.backgroundSecondary)
                 NavigationLink {
                     ProfilesView(config: config)
                 } label: {
@@ -348,7 +353,6 @@ private struct SystemTab: View {
                 }
                 .scarfGoCompactListRow()
                 .listRowBackground(ScarfColor.backgroundSecondary)
-            }
             }
 
             if !config.isServe {
@@ -481,21 +485,5 @@ private struct SystemTab: View {
                  ? "Host details for \(config.displayName) will be removed. Other servers stay configured. This cannot be undone."
                  : "Your SSH key and host settings for \(config.displayName) will be removed. Other servers stay configured. This cannot be undone.")
         }
-    }
-}
-
-struct ServeNeedsSSHPlaceholder: View {
-    let title: String
-    let message: String
-
-    var body: some View {
-        ContentUnavailableView {
-            Label(title, systemImage: "lock.slash")
-        } description: {
-            Text(message)
-        }
-        .background(ScarfColor.backgroundPrimary)
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -238,6 +238,108 @@ import Foundation
         #expect(rows[0].title == "T")
     }
 
+    @Test func serveClientFlattensKanbanBoardColumns() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            #expect(request.url?.path == "/api/plugins/kanban/board")
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            #expect(items.contains(where: { $0.name == "tenant" && $0.value == "scarf:demo" }))
+            let body = """
+            {"columns":[
+              {"name":"todo","tasks":[
+                {"id":"t1","title":"First","status":"todo","priority":40,"skills":null}
+              ]},
+              {"name":"running","tasks":[
+                {"id":"t2","title":"Second","status":"running","assignee":"coder","skills":["debug"]}
+              ]}
+            ],"tenants":["scarf:demo"],"assignees":["coder"],"latest_event_id":3,"now":1710000000}
+            """
+            return (200, Data(body.utf8))
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let tasks = try await client.listKanbanTasks(tenant: "scarf:demo")
+        #expect(tasks.count == 2)
+        #expect(tasks[0].id == "t1")
+        #expect(tasks[0].skills.isEmpty)
+        #expect(tasks[1].assignee == "coder")
+        #expect(tasks[1].skills == ["debug"])
+    }
+
+    @Test func serveClientDecodesKanbanTaskDetailAndStats() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            switch request.url?.path {
+            case "/api/plugins/kanban/tasks/t1":
+                let body = """
+                {"task":{"id":"t1","title":"First","status":"todo","body":"full"},
+                 "comments":[{"id":1,"task_id":"t1","author":"alan","body":"hi","created_at":1710000000}],
+                 "events":[],"runs":[{"id":9,"task_id":"t1","status":"done","started_at":1710000000}]}
+                """
+                return (200, Data(body.utf8))
+            case "/api/plugins/kanban/stats":
+                let body = #"{"by_status":{"todo":2,"running":1},"by_assignee":{"coder":{"todo":1}},"oldest_ready_age_seconds":12}"#
+                return (200, Data(body.utf8))
+            case "/api/plugins/kanban/assignees":
+                let body = #"{"assignees":[{"name":"coder","on_disk":true,"counts":{"todo":1,"running":2}}]}"#
+                return (200, Data(body.utf8))
+            default:
+                return (404, Data())
+            }
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let detail = try await client.kanbanTaskDetail(taskId: "t1")
+        #expect(detail.task.title == "First")
+        #expect(detail.comments.count == 1)
+        let runs = try await client.kanbanTaskRuns(taskId: "t1")
+        #expect(runs.count == 1)
+        #expect(runs[0].id == 9)
+        let stats = try await client.kanbanStats()
+        #expect(stats.byStatus["todo"] == 2)
+        #expect(stats.oldestReadyAgeSeconds == 12)
+        let assignees = try await client.kanbanAssignees()
+        #expect(assignees.count == 1)
+        #expect(assignees[0].profile == "coder")
+        #expect(assignees[0].totalCount == 3)
+    }
+
+    @Test func serveClientListsWebhooksAndProfiles() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            switch request.url?.path {
+            case "/api/webhooks":
+                let body = """
+                {"enabled":true,"base_url":"http://h:9119",
+                 "subscriptions":[{"name":"github","description":"PRs","deliver":"log","events":["push"],"url":"http://h:9119/webhooks/github"}]}
+                """
+                return (200, Data(body.utf8))
+            case "/api/profiles":
+                return (200, Data(#"{"profiles":[{"name":"default","is_default":true},{"name":"coder"}]}"#.utf8))
+            case "/api/profiles/active":
+                return (200, Data(#"{"active":"coder","current":"default"}"#.utf8))
+            default:
+                return (404, Data())
+            }
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let hooks = try await client.listWebhooks()
+        #expect(hooks.enabled == true)
+        #expect(hooks.subscriptions?.first?.name == "github")
+        let profiles = try await client.listProfiles()
+        #expect(profiles.compactMap(\.name) == ["default", "coder"])
+        let active = try await client.fetchActiveProfile()
+        #expect(active.active == "coder")
+    }
+
+    @Test func serveHTTP404CopyIsNotLoginSpecific() {
+        #expect(HermesServeError.httpStatus(404, "").errorDescription?.contains("login") != true)
+    }
+
     @Test func hasHermesServeGatesOn018() {
         #expect(HermesCapabilities.parseLine("Hermes Agent v0.18.0 (2026.7.1)").hasHermesServe)
         #expect(!HermesCapabilities.parseLine("Hermes Agent v0.17.0 (2026.6.19)").hasHermesServe)

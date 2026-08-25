@@ -2,19 +2,13 @@ import SwiftUI
 import ScarfCore
 import ScarfDesign
 
-/// Read-only Kanban surface for iOS / iPadOS, scoped to one project's
-/// tenant. Renders the 5 standard board columns as a horizontally-
-/// paged `TabView` of single-column lists — HIG-friendly on iPhone
-/// where a 5-column grid would force unreadable card widths.
-///
-/// Mutations + drag-drop are deferred to a later release per
-/// CLAUDE.md's iOS catch-up policy. Tap a card to open a read-only
-/// detail sheet that surfaces the same comments / events / runs the
-/// Mac inspector shows. iPad gets the same view (no drag-drop yet) —
-/// same UI for both form factors keeps the future mutation path
-/// straightforward.
+/// Read-only Kanban surface for iOS / iPadOS. Opened from a Scarf
+/// project (tenant-scoped) or, on a Hermes URL connection, as the
+/// host-level board (`project == nil`).
 struct ScarfGoKanbanView: View {
-    let project: ProjectEntry
+    /// Scarf project tenant when opened from a project; `nil` is the
+    /// host-level Hermes board (Hermes URL connections, or the Mac board).
+    let project: ProjectEntry?
     let context: ServerContext
 
     @State private var tasks: [HermesKanbanTask] = []
@@ -26,7 +20,12 @@ struct ScarfGoKanbanView: View {
     @State private var pollTask: Task<Void, Never>?
 
     private var resolvedTenant: String? {
-        KanbanTenantReader(context: context).tenant(forProjectPath: project.path)
+        guard let project else { return nil }
+        return KanbanTenantReader(context: context).tenant(forProjectPath: project.path)
+    }
+
+    private var boardIdentity: String {
+        project?.id ?? "host-board"
     }
 
     var body: some View {
@@ -37,6 +36,13 @@ struct ScarfGoKanbanView: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
             }
+            if project == nil, context.isServe {
+                Text("Host Kanban board. Scarf project folders and AGENTS.md still need SSH.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+                    .padding(.bottom, 4)
+            }
             columnPicker
                 .padding(.horizontal)
                 .padding(.bottom, 4)
@@ -44,7 +50,7 @@ struct ScarfGoKanbanView: View {
             content
         }
         .background(ScarfColor.backgroundPrimary)
-        .task(id: project.id) {
+        .task(id: boardIdentity) {
             await refresh()
             startPolling()
         }
@@ -166,13 +172,13 @@ struct ScarfGoKanbanView: View {
     private func refresh() async {
         isLoading = true
         defer { isLoading = false }
-        guard let tenant = resolvedTenant, !tenant.isEmpty else {
+        if let project, (resolvedTenant == nil || resolvedTenant?.isEmpty == true), !context.isServe {
             tasks = []
             error = "No Kanban tenant has been minted for this project yet. Open the Kanban tab on the Mac app to mint one."
             return
         }
         let svc = KanbanService(context: context)
-        let filter = KanbanListFilter(tenant: tenant)
+        let filter = KanbanListFilter(tenant: resolvedTenant)
         do {
             let polled = try await svc.list(filter)
             tasks = polled
@@ -228,8 +234,12 @@ struct ScarfGoKanbanView: View {
         switch column {
         case .triage:    return "No tasks waiting on a specifier."
         case .scheduled: return "Parked tasks awaiting a trigger will show up here."
-        case .upNext:    return "Drop a task on the Mac board, or create one with `hermes kanban create`."
-        case .running:   return "No workers are running tasks for this project right now."
+        case .upNext:    return project == nil
+            ? "Create a task in the Hermes dashboard, or with `hermes kanban create`."
+            : "Drop a task on the Mac board, or create one with `hermes kanban create`."
+        case .running:   return project == nil
+            ? "No workers are running tasks right now."
+            : "No workers are running tasks for this project right now."
         case .review:    return "Completed work awaiting verification lands here."
         case .blocked:   return "Nothing is blocked. When a worker hits a block, it'll show up here."
         case .done:      return "Recent completions will land here."

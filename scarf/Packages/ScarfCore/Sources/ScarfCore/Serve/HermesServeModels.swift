@@ -137,6 +137,87 @@ public struct HermesServeCronJobDTO: Sendable, Hashable, Codable {
     }
 }
 
+public struct HermesServeKanbanBoardDTO: Sendable, Codable {
+    public var columns: [Column]
+
+    public struct Column: Sendable, Codable {
+        public var name: String?
+        public var tasks: [HermesKanbanTask]
+    }
+
+    public func allTasks() -> [HermesKanbanTask] {
+        columns.flatMap(\.tasks)
+    }
+}
+
+public struct HermesServeKanbanStatsDTO: Sendable, Hashable, Codable {
+    public var byStatus: [String: Int]?
+    public var oldestReadyAgeSeconds: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case byStatus = "by_status"
+        case oldestReadyAgeSeconds = "oldest_ready_age_seconds"
+    }
+
+    public func asStats() -> HermesKanbanStats {
+        HermesKanbanStats(
+            byStatus: byStatus ?? [:],
+            oldestReadyAgeSeconds: oldestReadyAgeSeconds
+        )
+    }
+}
+
+public struct HermesServeKanbanAssigneeDTO: Sendable, Hashable, Codable {
+    public var name: String?
+    public var profile: String?
+    public var counts: [String: Int]?
+    public var active: Int?
+    public var total: Int?
+
+    public func asAssignee() -> HermesKanbanAssignee? {
+        let profileName = name ?? profile ?? ""
+        guard !profileName.isEmpty else { return nil }
+        let summed = (counts ?? [:]).values.reduce(0, +)
+        return HermesKanbanAssignee(
+            profile: profileName,
+            activeCount: active ?? (counts?["running"] ?? 0),
+            totalCount: total ?? summed
+        )
+    }
+}
+
+public struct HermesServeKanbanLogDTO: Sendable, Hashable, Codable {
+    public var content: String?
+}
+
+public struct HermesServeWebhookListDTO: Sendable, Hashable, Codable {
+    public var enabled: Bool?
+    public var subscriptions: [HermesServeWebhookDTO]?
+}
+
+public struct HermesServeWebhookDTO: Sendable, Hashable, Codable {
+    public var name: String
+    public var description: String?
+    public var events: [String]?
+    public var deliver: String?
+    public var url: String?
+}
+
+public struct HermesServeProfileDTO: Sendable, Hashable, Codable {
+    public var name: String?
+    public var isDefault: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case isDefault = "is_default"
+    }
+}
+
+public struct HermesServeActiveProfileDTO: Sendable, Hashable, Codable {
+    public var active: String?
+    public var current: String?
+}
+
 public struct HermesServeSkillDTO: Sendable, Hashable, Codable {
     public var name: String
     public var description: String?
@@ -192,7 +273,7 @@ public enum HermesServeError: Error, LocalizedError, Equatable, Sendable {
         case -1:
             return "Couldn't read the Hermes serve response."
         case 404:
-            return "Hermes serve didn't recognize that login method."
+            return "Hermes serve couldn't find that resource."
         case 422:
             return "Hermes rejected the login request. Check username and password."
         case 429:

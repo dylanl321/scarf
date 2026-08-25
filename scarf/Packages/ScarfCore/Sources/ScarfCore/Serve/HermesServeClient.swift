@@ -258,20 +258,33 @@ public actor HermesServeClient {
         }
     }
 
+    /// Login (or token-mode stash) for a serve `ServerContext`.
+    public static func authenticated(
+        context: ServerContext,
+        session: URLSession? = nil
+    ) async throws -> HermesServeClient {
+        guard let cfg = context.serveConfig else {
+            throw HermesServeError.notAServeContext
+        }
+        let client = HermesServeClient(config: cfg, session: session)
+        try await client.authenticate(serverID: context.id, username: cfg.username)
+        return client
+    }
+
     // MARK: - HTTP
 
-    private func profiled(_ path: String) -> String {
+    func profiled(_ path: String) -> String {
         guard let profile = config.profile, !profile.isEmpty else { return path }
         let sep = path.contains("?") ? "&" : "?"
         return "\(path)\(sep)profile=\(profile)"
     }
 
-    private func get(path: String, authenticated: Bool) async throws -> Data {
+    func get(path: String, authenticated: Bool) async throws -> Data {
         try await request(path: path, method: "GET", body: nil, authenticated: authenticated)
     }
 
     @discardableResult
-    private func request(
+    func request(
         path: String,
         method: String,
         body: Data?,
@@ -303,7 +316,7 @@ public actor HermesServeClient {
         throw HermesServeError.httpStatus(http.statusCode, "")
     }
 
-    private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+    func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do {
             return try JSONDecoder().decode(type, from: data)
         } catch {

@@ -147,6 +147,10 @@ struct ProfilesView: View {
     private func load() async {
         isLoading = true
         defer { isLoading = false }
+        if context.isServe {
+            await loadFromServe()
+            return
+        }
         let ctx = context
         // `active_profile` is a root-home concept — read it from the root
         // even while the context is scoped to a named profile (#120).
@@ -178,6 +182,24 @@ struct ProfilesView: View {
         } else {
             // Transport threw — keep any last-known list and surface the error.
             self.lastError = "Couldn't reach `hermes profile list` on this server."
+        }
+    }
+
+    private func loadFromServe() async {
+        do {
+            let client = try await HermesServeClient.authenticated(context: context)
+            let rows = try await client.listProfiles()
+            let active = try await client.fetchActiveProfile()
+            namedProfiles = rows.compactMap { row in
+                let name = row.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !name.isEmpty, name != "default", row.isDefault != true else { return nil }
+                return name
+            }
+            let sticky = (active.active ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            hostActiveProfile = (sticky.isEmpty || sticky == "default") ? nil : sticky
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
         }
     }
 
