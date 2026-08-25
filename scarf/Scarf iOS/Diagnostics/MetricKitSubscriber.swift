@@ -1,6 +1,7 @@
 import Foundation
 import MetricKit
 import os
+import ScarfCore
 
 /// MetricKit subscriber that persists crash + hang diagnostic payloads
 /// to the app's Documents directory so the user can share them on the
