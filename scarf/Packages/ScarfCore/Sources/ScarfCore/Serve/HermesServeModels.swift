@@ -171,8 +171,8 @@ public enum HermesServeError: Error, LocalizedError, Equatable, Sendable {
         switch self {
         case .invalidURL(let s):
             return "Invalid Hermes URL: \(s)"
-        case .httpStatus(let code, let body):
-            return "Hermes serve returned HTTP \(code). \(Self.redactSecrets(in: body))"
+        case .httpStatus(let code, _):
+            return Self.userFacingHTTPMessage(code)
         case .unauthorized:
             return "Hermes serve rejected the credentials. Check username and password."
         case .decoding(let msg):
@@ -186,11 +186,21 @@ public enum HermesServeError: Error, LocalizedError, Equatable, Sendable {
         }
     }
 
-    /// Pydantic 422s echo the request body, including the password.
-    static func redactSecrets(in body: String) -> String {
-        let pattern = #""password"\s*:\s*"(?:\\.|[^"\\])*""#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return body }
-        let range = NSRange(body.startIndex..<body.endIndex, in: body)
-        return regex.stringByReplacingMatches(in: body, options: [], range: range, withTemplate: "\"password\":\"***\"")
+    /// Never put server response bodies here — auth 422s echo the password.
+    static func userFacingHTTPMessage(_ code: Int) -> String {
+        switch code {
+        case -1:
+            return "Couldn't read the Hermes serve response."
+        case 404:
+            return "Hermes serve didn't recognize that login method."
+        case 422:
+            return "Hermes rejected the login request. Check username and password."
+        case 429:
+            return "Too many login attempts. Wait a minute and retry."
+        case 503:
+            return "Hermes auth is temporarily unavailable."
+        default:
+            return "Couldn't reach Hermes serve (HTTP \(code))."
+        }
     }
 }

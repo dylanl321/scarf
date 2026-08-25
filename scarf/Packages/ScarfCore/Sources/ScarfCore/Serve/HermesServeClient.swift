@@ -300,9 +300,7 @@ public actor HermesServeClient {
         if http.statusCode == 401 { throw HermesServeError.unauthorized }
         if (200...299).contains(http.statusCode) { return data }
         if acceptRedirect, (300...399).contains(http.statusCode) { return data }
-        let snippet = String(data: data, encoding: .utf8) ?? ""
-        let clipped = String(snippet.prefix(200))
-        throw HermesServeError.httpStatus(http.statusCode, clipped)
+        throw HermesServeError.httpStatus(http.statusCode, "")
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {

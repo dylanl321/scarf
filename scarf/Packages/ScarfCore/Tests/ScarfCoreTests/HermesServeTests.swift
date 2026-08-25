@@ -101,11 +101,14 @@ import Foundation
         #expect(HermesServeStatus(auth_providers: ["ldap"]).passwordLoginProvider == "ldap")
     }
 
-    @Test func httpErrorRedactsPassword() {
+    @Test func httpErrorDoesNotShowResponseBody() {
         let raw = #"{"detail":[{"input":{"password":"secret","username":"admin"}}]}"#
         let shown = HermesServeError.httpStatus(422, raw).errorDescription ?? ""
         #expect(!shown.contains("secret"))
-        #expect(shown.contains("***"))
+        #expect(!shown.contains("admin"))
+        #expect(!shown.contains("password"))
+        #expect(!shown.contains("{"))
+        #expect(shown.contains("rejected the login"))
     }
 
     @Test func sessionDTOMapsToHermesSession() {
