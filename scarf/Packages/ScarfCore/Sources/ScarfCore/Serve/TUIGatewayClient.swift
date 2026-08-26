@@ -48,17 +48,37 @@ public actor TUIGatewayClient {
         _ = try await rpc(method: "gateway.ping", params: [:])
     }
 
-    public func createSession() async throws -> String {
-        let data = try await rpc(method: "session.create", params: [:])
-        if let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let sid = obj["session_id"] as? String { return sid }
-            if let sid = obj["id"] as? String { return sid }
-            if let result = obj["result"] as? [String: Any] {
-                if let sid = result["session_id"] as? String { return sid }
-                if let sid = result["id"] as? String { return sid }
-            }
+    /// Open a fresh TUI-gateway session. Returns both the live runtime id
+    /// (for `prompt.submit`) and the durable stored id (for later
+    /// `session.resume` after a WebSocket drop).
+    public func createSession(profile: String? = nil) async throws -> TUIGatewaySessionBind {
+        var params: [String: Any] = ["source": "scarf"]
+        if let profile, !profile.isEmpty {
+            params["profile"] = profile
         }
-        throw HermesServeError.decoding("session.create")
+        let data = try await rpc(method: "session.create", params: params)
+        return try TUIGatewaySessionParsing.parseBind(from: data, defaultResumed: false)
+    }
+
+    /// Reattach to an existing session by durable (or still-live) id.
+    /// Hermes returns a fresh live `session_id` plus the transcript.
+    public func resumeSession(
+        sessionID: String,
+        profile: String? = nil
+    ) async throws -> TUIGatewaySessionBind {
+        var params: [String: Any] = [
+            "session_id": sessionID,
+            "source": "scarf",
+        ]
+        if let profile, !profile.isEmpty {
+            params["profile"] = profile
+        }
+        let data = try await rpc(method: "session.resume", params: params)
+        return try TUIGatewaySessionParsing.parseBind(
+            from: data,
+            sessionIDFallback: sessionID,
+            defaultResumed: true
+        )
     }
 
     public func submitPrompt(sessionID: String, text: String) async throws {
