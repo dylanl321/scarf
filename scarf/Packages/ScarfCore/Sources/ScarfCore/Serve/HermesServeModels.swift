@@ -244,20 +244,76 @@ public struct HermesServeSkillDTO: Sendable, Hashable, Codable {
     public var description: String?
     public var category: String?
     public var enabled: Bool?
+    public var path: String?
+    public var files: [String]?
+
+    public init(
+        name: String,
+        description: String? = nil,
+        category: String? = nil,
+        enabled: Bool? = nil,
+        path: String? = nil,
+        files: [String]? = nil
+    ) {
+        self.name = name
+        self.description = description
+        self.category = category
+        self.enabled = enabled
+        self.path = path
+        self.files = files
+    }
 
     public func asHermesSkill() -> HermesSkill {
         let categoryName = (category?.isEmpty == false) ? category! : "other"
+        let listed = (files ?? []).filter { !$0.isEmpty }
+        // Dashboard list has no file manifest. SKILL.md is the file
+        // `GET /api/skills/content` can fetch.
+        let fileList = listed.isEmpty ? ["SKILL.md"] : listed
         return HermesSkill(
             id: name,
             name: name,
             category: categoryName,
-            path: "",
-            files: [],
+            path: path ?? "",
+            files: fileList,
             requiredConfig: [],
             enabled: enabled ?? true,
-            pinned: false
+            pinned: false,
+            summary: description
         )
     }
+}
+
+public struct HermesServeSkillContentDTO: Sendable, Hashable, Codable {
+    public var name: String?
+    public var content: String?
+    public var path: String?
+}
+
+public struct HermesServeHubSkillDTO: Sendable, Hashable, Codable {
+    public var name: String?
+    public var description: String?
+    public var source: String?
+    public var identifier: String?
+
+    public func asHermesHubSkill() -> HermesHubSkill? {
+        let ident = (identifier?.isEmpty == false) ? identifier! : (name ?? "")
+        guard !ident.isEmpty else { return nil }
+        return HermesHubSkill(
+            identifier: ident,
+            name: (name?.isEmpty == false) ? name! : ident,
+            description: description ?? "",
+            source: source ?? ""
+        )
+    }
+}
+
+public struct HermesServeHubSourcesDTO: Sendable, Hashable, Codable {
+    public var featured: [HermesServeHubSkillDTO]?
+    public var index_available: Bool?
+}
+
+public struct HermesServeHubSearchDTO: Sendable, Hashable, Codable {
+    public var results: [HermesServeHubSkillDTO]?
 }
 
 public enum HermesServeError: Error, LocalizedError, Equatable, Sendable {

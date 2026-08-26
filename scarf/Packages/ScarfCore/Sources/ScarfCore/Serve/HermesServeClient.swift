@@ -360,6 +360,66 @@ public actor HermesServeClient {
         }
     }
 
+    /// `GET /api/skills/content?name=`. Dashboard editor payload.
+    public func fetchSkillContent(name: String) async throws -> HermesServeSkillContentDTO {
+        let path = profiled(queryPath("/api/skills/content", ["name": name]))
+        let data = try await get(path: path, authenticated: true)
+        return try decode(HermesServeSkillContentDTO.self, from: data)
+    }
+
+    /// `GET /api/skills/hub/sources` featured list — Hermes browse analog
+    /// (empty-query search returns nothing).
+    public func listSkillHubFeatured() async throws -> [HermesHubSkill] {
+        let data = try await get(path: profiled("/api/skills/hub/sources"), authenticated: true)
+        let dto = try decode(HermesServeHubSourcesDTO.self, from: data)
+        return (dto.featured ?? []).compactMap { $0.asHermesHubSkill() }
+    }
+
+    /// `GET /api/skills/hub/search?q=&source=&limit=`.
+    public func searchSkillHub(
+        query: String,
+        source: String = "all",
+        limit: Int = 40
+    ) async throws -> [HermesHubSkill] {
+        let path = profiled(queryPath("/api/skills/hub/search", [
+            "q": query,
+            "source": source,
+            "limit": String(min(max(limit, 1), 50)),
+        ]))
+        let data = try await get(path: path, authenticated: true)
+        let dto = try decode(HermesServeHubSearchDTO.self, from: data)
+        return (dto.results ?? []).compactMap { $0.asHermesHubSkill() }
+    }
+
+    public func installHubSkill(identifier: String) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["identifier": identifier])
+        _ = try await request(
+            path: profiled("/api/skills/hub/install"),
+            method: "POST",
+            body: body,
+            authenticated: true
+        )
+    }
+
+    public func uninstallHubSkill(name: String) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["name": name])
+        _ = try await request(
+            path: profiled("/api/skills/hub/uninstall"),
+            method: "POST",
+            body: body,
+            authenticated: true
+        )
+    }
+
+    public func updateHubSkills() async throws {
+        _ = try await request(
+            path: profiled("/api/skills/hub/update"),
+            method: "POST",
+            body: nil,
+            authenticated: true
+        )
+    }
+
     /// Login (or token-mode stash) for a serve `ServerContext`.
     public static func authenticated(
         context: ServerContext,

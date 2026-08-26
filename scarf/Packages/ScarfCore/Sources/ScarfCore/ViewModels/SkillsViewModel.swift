@@ -252,7 +252,12 @@ public final class SkillsViewModel {
         let mainFile = skill.files.first(where: { $0.hasSuffix(".md") }) ?? skill.files.first
         if let file = mainFile {
             selectedFileName = file
-            skillContent = loadSkillContent(path: skill.path + "/" + file)
+            if context.isServe {
+                skillContent = ""
+                Task { await loadServeSkillContent(name: skill.name) }
+            } else {
+                skillContent = loadSkillContent(path: skill.path + "/" + file)
+            }
         } else {
             selectedFileName = nil
             skillContent = ""
@@ -273,7 +278,28 @@ public final class SkillsViewModel {
     public func selectFile(_ file: String) {
         guard let skill = selectedSkill else { return }
         selectedFileName = file
-        skillContent = loadSkillContent(path: skill.path + "/" + file)
+        if context.isServe {
+            skillContent = ""
+            Task { await loadServeSkillContent(name: skill.name) }
+        } else {
+            skillContent = loadSkillContent(path: skill.path + "/" + file)
+        }
+    }
+
+    @MainActor
+    private func loadServeSkillContent(name: String) async {
+        guard context.isServe, selectedSkill?.name == name else { return }
+        do {
+            let client = try await HermesServeClient.authenticated(context: context)
+            let dto = try await client.fetchSkillContent(name: name)
+            guard selectedSkill?.name == name else { return }
+            skillContent = dto.content ?? ""
+        } catch {
+            if selectedSkill?.name == name {
+                lastError = error.localizedDescription
+                skillContent = ""
+            }
+        }
     }
 
     public var isMarkdownFile: Bool {
@@ -304,6 +330,10 @@ public final class SkillsViewModel {
     // MARK: - Hub browse / search / install / update
 
     public func browseHub() {
+        if context.isServe {
+            Task { await browseHubFromServe() }
+            return
+        }
         isHubLoading = true
         let bin = context.paths.hermesBinary
         let xport = transport
@@ -322,9 +352,37 @@ public final class SkillsViewModel {
         }
     }
 
+    @MainActor
+    private func browseHubFromServe() async {
+        isHubLoading = true
+        hubMessage = nil
+        do {
+            let client = try await HermesServeClient.authenticated(context: context)
+            var featured = try await client.listSkillHubFeatured()
+            if hubSource != "all" {
+                featured = featured.filter { $0.source == hubSource }
+            }
+            await finishBrowse(results: featured, exitCode: 0, rawOutput: "", isSearch: false)
+            if featured.isEmpty {
+                hubMessage = "Search by name to query the hub."
+            }
+        } catch {
+            await finishBrowse(
+                results: [],
+                exitCode: 1,
+                rawOutput: error.localizedDescription,
+                isSearch: false
+            )
+        }
+    }
+
     public func searchHub() {
         guard !hubQuery.isEmpty else {
             browseHub()
+            return
+        }
+        if context.isServe {
+            Task { await searchHubFromServe() }
             return
         }
         let source = hubSource
@@ -361,6 +419,28 @@ public final class SkillsViewModel {
                 results: parsed,
                 exitCode: result.exitCode,
                 rawOutput: result.output,
+                isSearch: true
+            )
+        }
+    }
+
+    @MainActor
+    private func searchHubFromServe() async {
+        isHubLoading = true
+        hubMessage = nil
+        do {
+            let client = try await HermesServeClient.authenticated(context: context)
+            let results = try await client.searchSkillHub(
+                query: hubQuery,
+                source: hubSource,
+                limit: 40
+            )
+            await finishBrowse(results: results, exitCode: 0, rawOutput: "", isSearch: true)
+        } catch {
+            await finishBrowse(
+                results: [],
+                exitCode: 1,
+                rawOutput: error.localizedDescription,
                 isSearch: true
             )
         }
@@ -427,6 +507,10 @@ public final class SkillsViewModel {
     }
 
     public func installHubSkill(_ skill: HermesHubSkill) {
+        if context.isServe {
+            Task { await installHubSkillFromServe(skill) }
+            return
+        }
         isHubLoading = true
         hubMessage = "Installing \(skill.identifier)…"
         let bin = context.paths.hermesBinary
@@ -441,6 +525,20 @@ public final class SkillsViewModel {
                 timeout: 120
             )
             await self?.finishInstall(identifier: identifier, exitCode: result.exitCode)
+        }
+    }
+
+    @MainActor
+    private func installHubSkillFromServe(_ skill: HermesHubSkill) async {
+        isHubLoading = true
+        hubMessage = "Installing \(skill.identifier)…"
+        do {
+            let client = try await HermesServeClient.authenticated(context: context)
+            try await client.installHubSkill(identifier: skill.identifier)
+            await finishInstall(identifier: skill.identifier, exitCode: 0)
+        } catch {
+            hubMessage = "Install failed: \(error.localizedDescription)"
+            isHubLoading = false
         }
     }
 
@@ -523,6 +621,10 @@ public final class SkillsViewModel {
     nonisolated static let updateAllArgs = ["skills", "update"]
 
     public func uninstallHubSkill(_ identifier: String) {
+        if context.isServe {
+            Task { await uninstallHubSkillFromServe(identifier) }
+            return
+        }
         let bin = context.paths.hermesBinary
         let xport = transport
         Task.detached { [weak self] in
@@ -537,7 +639,24 @@ public final class SkillsViewModel {
         }
     }
 
+    @MainActor
+    private func uninstallHubSkillFromServe(_ identifier: String) async {
+        do {
+            let client = try await HermesServeClient.authenticated(context: context)
+            try await client.uninstallHubSkill(name: identifier)
+            await finishUninstall(exitCode: 0)
+        } catch {
+            hubMessage = "Uninstall failed: \(error.localizedDescription)"
+        }
+    }
+
     public func checkForUpdates() {
+        if context.isServe {
+            isHubLoading = false
+            updates = []
+            hubMessage = "Hermes URL can refresh installed hub skills but doesn't list pending versions. Use Update All."
+            return
+        }
         isHubLoading = true
         let bin = context.paths.hermesBinary
         let xport = transport
@@ -567,6 +686,10 @@ public final class SkillsViewModel {
     }
 
     public func updateAll() {
+        if context.isServe {
+            Task { await updateAllFromServe() }
+            return
+        }
         let bin = context.paths.hermesBinary
         let xport = transport
         Task.detached { [weak self] in
@@ -581,9 +704,32 @@ public final class SkillsViewModel {
         }
     }
 
+    @MainActor
+    private func updateAllFromServe() async {
+        isHubLoading = true
+        hubMessage = "Updating…"
+        do {
+            let client = try await HermesServeClient.authenticated(context: context)
+            try await client.updateHubSkills()
+            skippedLocalEdits = []
+            hubMessage = "Update started on the host"
+            await load()
+            isHubLoading = false
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            hubMessage = nil
+        } catch {
+            isHubLoading = false
+            hubMessage = "Update failed: \(error.localizedDescription)"
+        }
+    }
+
     /// Re-run the update for one skill with `--force`, discarding that
     /// skill's local edits. Gate the call site on `hasSkillsUpdateForce`.
     public func forceUpdateSkill(_ name: String) {
+        if context.isServe {
+            hubMessage = "Forced updates need SSH. Use Update All over Hermes URL."
+            return
+        }
         let bin = context.paths.hermesBinary
         let xport = transport
         isHubLoading = true

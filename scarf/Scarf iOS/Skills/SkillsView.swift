@@ -11,7 +11,8 @@ import ScarfDesign
 /// - **Installed**: category-grouped list. Tap a skill to view its
 ///   files, edit content, or uninstall.
 /// - **Browse Hub**: search + source picker. Tap to install. Calls
-///   remote `hermes skills search/browse` over SSH.
+///   remote `hermes skills search/browse` over SSH, or the dashboard
+///   `/api/skills/hub/*` routes on a Hermes URL connection.
 /// - **Updates**: check + update-all buttons. Calls remote
 ///   `hermes skills check / update --yes`.
 struct SkillsView: View {

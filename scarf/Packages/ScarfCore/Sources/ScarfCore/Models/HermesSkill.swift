@@ -47,6 +47,9 @@ public struct HermesSkill: Identifiable, Sendable {
     /// Read from `CuratorViewModel.status.pinnedNames`; defaults to
     /// `false` when curator state is unavailable.
     public let pinned: Bool
+    /// One-line description from `GET /api/skills`. Nil on SSH scans
+    /// that only walk filenames.
+    public let summary: String?
 
     public init(
         id: String,
@@ -59,7 +62,8 @@ public struct HermesSkill: Identifiable, Sendable {
         relatedSkills: [String]? = nil,
         dependencies: [String]? = nil,
         enabled: Bool = true,
-        pinned: Bool = false
+        pinned: Bool = false,
+        summary: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -72,5 +76,6 @@ public struct HermesSkill: Identifiable, Sendable {
         self.dependencies = dependencies
         self.enabled = enabled
         self.pinned = pinned
+        self.summary = summary
     }
 }

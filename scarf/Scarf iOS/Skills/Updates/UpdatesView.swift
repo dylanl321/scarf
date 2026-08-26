@@ -55,7 +55,7 @@ struct UpdatesView: View {
             .controlSize(.small)
             .disabled(vm.isHubLoading)
 
-            if !vm.updates.isEmpty {
+            if !vm.updates.isEmpty || vm.context.isServe {
                 Button {
                     vm.updateAll()
                 } label: {
