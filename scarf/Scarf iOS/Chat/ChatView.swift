@@ -124,18 +124,11 @@ struct ChatView: View {
     /// blocking access to the toolbar nav button on small phones.)
     @FocusState private var composerFocused: Bool
 
-    /// Idle landing vs live transcript. Connecting / reconnecting keep
-    /// the active chrome so the user sees progress instead of bouncing
-    /// back to the landing.
+    /// Idle landing vs live transcript. Connecting / reconnecting /
+    /// failed keep the active chrome so the user sees progress or Retry
+    /// instead of bouncing back to the landing.
     private var showsIdleLanding: Bool {
-        switch controller.state {
-        case .idle:
-            return true
-        case .failed where controller.vm.sessionId == nil && !controller.openedByResuming:
-            return true
-        default:
-            return false
-        }
+        controller.state == .idle
     }
 
     private var navigationTitleText: String {
