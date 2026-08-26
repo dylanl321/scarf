@@ -177,8 +177,8 @@ struct SettingSpec: Identifiable, Hashable {
         SettingSpec(
             key: "approvals.mode",
             displayName: "Approval mode",
-            helpText: "How agents handle risky tool calls. Manual prompts you; auto approves reads; yolo approves writes too.",
-            kind: .enumPicker(options: ["manual", "auto", "yolo"])
+            helpText: "How agents handle risky tool calls. Manual prompts you; smart auto-approves routine reads; off skips the prompt.",
+            kind: .enumPicker(options: ["manual", "smart", "off"])
         ),
         SettingSpec(
             key: "agent.max_turns",

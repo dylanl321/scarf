@@ -43,6 +43,16 @@ public extension HermesConfig {
             let raw = values[key] ?? def
             return HermesYAML.stripYAMLQuotes(raw)
         }
+        // Hermes accepts `model` as a mapping (`default` / `provider`) or a
+        // bare string. Prefer the nested key; fall back to the scalar.
+        func strFirst(_ keys: [String], default def: String) -> String {
+            for key in keys {
+                if let raw = values[key], !raw.isEmpty {
+                    return HermesYAML.stripYAMLQuotes(raw)
+                }
+            }
+            return def
+        }
         // True-optional int: `nil` means "key absent from config.yaml",
         // distinct from any concrete int including 0. Used for
         // `database.wal_autocheckpoint` / `database.journal_size_limit`,
@@ -434,7 +444,7 @@ public extension HermesConfig {
         }
 
         self.init(
-            model: str("model.default", default: "unknown"),
+            model: strFirst(["model.default", "model"], default: "unknown"),
             provider: str("model.provider", default: "unknown"),
             // 0 is the "key absent" sentinel, NOT a real default. Hermes's
             // server-side default changed at v0.20 (60 → 500), so parsing a

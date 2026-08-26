@@ -164,11 +164,26 @@ public actor HermesServeClient {
         try await get(path: profiled("/api/config"), authenticated: true)
     }
 
+    /// `GET /api/config/raw` → `{yaml, path?}`. The dashboard JSON
+    /// endpoint flattens `model` to a string and drops `provider`;
+    /// this is the on-disk `config.yaml`.
+    public func fetchConfigRaw() async throws -> HermesServeRawConfigDTO {
+        let data = try await get(path: profiled("/api/config/raw"), authenticated: true)
+        return try decode(HermesServeRawConfigDTO.self, from: data)
+    }
+
+    /// `GET /api/model/info` → resolved `{model, provider, ...}`.
+    public func fetchModelInfo() async throws -> HermesServeModelInfoDTO {
+        let data = try await get(path: profiled("/api/model/info"), authenticated: true)
+        return try decode(HermesServeModelInfoDTO.self, from: data)
+    }
+
     public func putConfigJSON(_ json: Data) async throws {
+        let body = try HermesServeConfigJSON.wrapPutBody(json)
         _ = try await request(
             path: profiled("/api/config"),
             method: "PUT",
-            body: json,
+            body: body,
             authenticated: true
         )
     }

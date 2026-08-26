@@ -156,7 +156,9 @@ struct SettingsView: View {
         } header: {
             Text("Quick edits")
         } footer: {
-            Text("These flip common config.yaml values via `hermes config set` on the remote. Other fields below are read-only; edit them from the Mac app.")
+            Text(config.isServe
+                 ? "These write through PUT /api/config on the Hermes URL. Other fields below are read-only; edit them from the Mac app."
+                 : "These flip common config.yaml values via `hermes config set` on the remote. Other fields below are read-only; edit them from the Mac app.")
                 .font(.caption)
         }
     }
