@@ -7,7 +7,7 @@ import Foundation
 /// id (`stored_session_id` / `session_key`, used to reattach after the
 /// WebSocket drops). Clients must keep both: prompts need the live id,
 /// reconnect/resume need the stored id.
-public struct TUIGatewaySessionBind: Sendable, Equatable {
+public struct TUIGatewaySessionBind: Sendable {
     /// Live runtime id for in-process gateway RPCs (`prompt.submit`, etc.).
     public var liveSessionID: String
     /// Durable id for `session.resume` after disconnect. Empty when Hermes
