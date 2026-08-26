@@ -25,6 +25,17 @@ import Foundation
         #expect(p.values["model.provider"] == "openai")
     }
 
+    @Test func parsesBareStringModelAsDefault() {
+        let yaml = """
+        model: anthropic/claude-sonnet-4
+        """
+        let p = HermesYAML.parseNestedYAML(yaml)
+        #expect(p.values["model"] == "anthropic/claude-sonnet-4")
+        let c = HermesConfig(yaml: yaml)
+        #expect(c.model == "anthropic/claude-sonnet-4")
+        #expect(c.provider == "unknown")
+    }
+
     @Test func parsesBulletLists() {
         let yaml = """
         permanent_allowlist:

@@ -183,13 +183,27 @@ public final class IOSSettingsViewModel {
         do {
             let client = HermesServeClient(config: cfg)
             try await client.authenticate(serverID: context.id, username: cfg.username)
-            let data = try await client.fetchConfigJSON()
-            if let pretty = Self.prettyJSON(data) {
-                rawYAML = pretty
-            } else {
-                rawYAML = String(data: data, encoding: .utf8) ?? ""
+            var parsed: HermesConfig?
+            if let raw = try? await client.fetchConfigRaw(),
+               let yaml = raw.yaml?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !yaml.isEmpty {
+                rawYAML = raw.yaml ?? yaml
+                parsed = HermesConfig(yaml: yaml)
             }
-            config = HermesConfig(yaml: Self.yamlishFromJSON(data))
+            if parsed == nil {
+                let data = try await client.fetchConfigJSON()
+                if let pretty = Self.prettyJSON(data) {
+                    rawYAML = pretty
+                } else {
+                    rawYAML = String(data: data, encoding: .utf8) ?? ""
+                }
+                parsed = HermesConfig(yaml: HermesServeConfigJSON.yamlishFromJSON(data))
+            }
+            var next = parsed ?? .empty
+            if let info = try? await client.fetchModelInfo() {
+                next = HermesServeConfigJSON.overlayModelInfo(next, info)
+            }
+            config = next
         } catch {
             lastError = error.localizedDescription
             config = .empty
@@ -205,7 +219,7 @@ public final class IOSSettingsViewModel {
         let client = HermesServeClient(config: cfg)
         try await client.authenticate(serverID: context.id, username: cfg.username)
         let data = try await client.fetchConfigJSON()
-        let patched = try Self.setJSONValue(data, dottedKey: key, value: value)
+        let patched = try HermesServeConfigJSON.setJSONValue(data, dottedKey: key, value: value)
         try await client.putConfigJSON(patched)
     }
 
@@ -214,56 +228,6 @@ public final class IOSSettingsViewModel {
               let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
         else { return nil }
         return String(data: pretty, encoding: .utf8)
-    }
-
-    /// Flatten a JSON object into `key: value` lines so `HermesConfig(yaml:)`
-    /// can still pick out the fields it knows.
-    private static func yamlishFromJSON(_ data: Data) -> String {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return String(data: data, encoding: .utf8) ?? ""
-        }
-        var lines: [String] = []
-        func walk(_ node: Any, prefix: String) {
-            if let dict = node as? [String: Any] {
-                for (k, v) in dict.sorted(by: { $0.key < $1.key }) {
-                    let next = prefix.isEmpty ? k : "\(prefix).\(k)"
-                    walk(v, prefix: next)
-                }
-            } else if let arr = node as? [Any] {
-                let joined = arr.map { "\($0)" }.joined(separator: ", ")
-                lines.append("\(prefix): [\(joined)]")
-            } else {
-                lines.append("\(prefix): \(node)")
-            }
-        }
-        walk(obj, prefix: "")
-        return lines.joined(separator: "\n")
-    }
-
-    private static func setJSONValue(_ data: Data, dottedKey: String, value: String) throws -> Data {
-        let obj = try JSONSerialization.jsonObject(with: data)
-        guard var root = obj as? [String: Any] else {
-            throw HermesServeError.decoding("config is not a JSON object")
-        }
-        let parts = dottedKey.split(separator: ".").map(String.init)
-        guard !parts.isEmpty else { throw HermesServeError.decoding("empty config key") }
-        func set(_ dict: inout [String: Any], path: [String], value: Any) {
-            guard let first = path.first else { return }
-            if path.count == 1 {
-                dict[first] = value
-                return
-            }
-            var child = dict[first] as? [String: Any] ?? [:]
-            set(&child, path: Array(path.dropFirst()), value: value)
-            dict[first] = child
-        }
-        let typed: Any
-        if value == "true" { typed = true }
-        else if value == "false" { typed = false }
-        else if let n = Int(value) { typed = n }
-        else { typed = value }
-        set(&root, path: parts, value: typed)
-        return try JSONSerialization.data(withJSONObject: root)
     }
 }
 

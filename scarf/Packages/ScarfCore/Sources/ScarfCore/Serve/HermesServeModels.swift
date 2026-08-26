@@ -316,6 +316,18 @@ public struct HermesServeHubSearchDTO: Sendable, Hashable, Codable {
     public var results: [HermesServeHubSkillDTO]?
 }
 
+/// `GET /api/config/raw` — on-disk YAML, not the web-normalized JSON.
+public struct HermesServeRawConfigDTO: Sendable, Hashable, Codable {
+    public var yaml: String?
+    public var path: String?
+}
+
+/// `GET /api/model/info` — resolved assignment. Extra keys ignored.
+public struct HermesServeModelInfoDTO: Sendable, Hashable, Codable {
+    public var model: String?
+    public var provider: String?
+}
+
 public enum HermesServeError: Error, LocalizedError, Equatable, Sendable {
     case invalidURL(String)
     case httpStatus(Int, String)

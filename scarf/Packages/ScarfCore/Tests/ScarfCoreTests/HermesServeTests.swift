@@ -433,6 +433,108 @@ import Foundation
         #expect(skill.path.isEmpty)
     }
 
+    @Test func serveConfigJSONMapsFlattenedModelStringToDefault() throws {
+        let json = """
+        {"model":"anthropic/claude-sonnet-4","approvals":{"mode":"smart"},"agent":{"max_turns":150},"display":{"show_cost":false,"show_reasoning":false,"streaming":true}}
+        """.data(using: .utf8)!
+        let yaml = HermesServeConfigJSON.yamlishFromJSON(json)
+        #expect(yaml.contains("model.default: anthropic/claude-sonnet-4"))
+        let parsed = HermesConfig(yaml: yaml)
+        #expect(parsed.model == "anthropic/claude-sonnet-4")
+        #expect(parsed.approvalMode == "smart")
+        #expect(parsed.maxTurns == 150)
+        #expect(parsed.streaming == true)
+        #expect(parsed.showCost == false)
+        #expect(parsed.showReasoning == false)
+    }
+
+    @Test func serveConfigJSONWrapsPutBodyOnce() throws {
+        let inner = #"{"agent":{"max_turns":90}}"#.data(using: .utf8)!
+        let wrapped = try HermesServeConfigJSON.wrapPutBody(inner)
+        let obj = try JSONSerialization.jsonObject(with: wrapped) as? [String: Any]
+        let config = obj?["config"] as? [String: Any]
+        let agent = config?["agent"] as? [String: Any]
+        let turns = agent?["max_turns"]
+        #expect((turns as? Int) == 90 || (turns as? NSNumber)?.intValue == 90)
+        let twice = try HermesServeConfigJSON.wrapPutBody(wrapped)
+        #expect(twice == wrapped)
+    }
+
+    @Test func serveConfigJSONWritesModelDefaultAsStringWhenFlattened() throws {
+        let json = #"{"model":"old-model","approvals":{"mode":"smart"}}"#.data(using: .utf8)!
+        let patched = try HermesServeConfigJSON.setJSONValue(
+            json, dottedKey: "model.default", value: "new-model"
+        )
+        let obj = try JSONSerialization.jsonObject(with: patched) as? [String: Any]
+        #expect(obj?["model"] as? String == "new-model")
+    }
+
+    @Test func serveConfigJSONNestsProviderOntoStringModel() throws {
+        let json = #"{"model":"claude-sonnet-4"}"#.data(using: .utf8)!
+        let patched = try HermesServeConfigJSON.setJSONValue(
+            json, dottedKey: "model.provider", value: "anthropic"
+        )
+        let obj = try JSONSerialization.jsonObject(with: patched) as? [String: Any]
+        let model = obj?["model"] as? [String: Any]
+        #expect(model?["default"] as? String == "claude-sonnet-4")
+        #expect(model?["provider"] as? String == "anthropic")
+    }
+
+    @Test func serveConfigJSONOverlaysUnknownModelFromInfo() {
+        var config = HermesConfig(yaml: "approvals:\n  mode: smart\n")
+        #expect(config.model == "unknown")
+        #expect(config.provider == "unknown")
+        config = HermesServeConfigJSON.overlayModelInfo(
+            config,
+            HermesServeModelInfoDTO(model: "claude-sonnet-4", provider: "anthropic")
+        )
+        #expect(config.model == "claude-sonnet-4")
+        #expect(config.provider == "anthropic")
+        #expect(config.approvalMode == "smart")
+    }
+
+    @Test func serveClientFetchesRawConfigAndModelInfo() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            switch request.url?.path {
+            case "/api/config/raw":
+                let body = #"{"yaml":"model:\n  default: gpt-4o\n  provider: openai\n","path":"/home/u/.hermes/config.yaml"}"#
+                return (200, Data(body.utf8))
+            case "/api/model/info":
+                return (200, Data(#"{"model":"gpt-4o","provider":"openai"}"#.utf8))
+            default:
+                return (404, Data())
+            }
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let raw = try await client.fetchConfigRaw()
+        #expect(raw.yaml?.contains("gpt-4o") == true)
+        let parsed = HermesConfig(yaml: raw.yaml ?? "")
+        #expect(parsed.model == "gpt-4o")
+        #expect(parsed.provider == "openai")
+        let info = try await client.fetchModelInfo()
+        #expect(info.model == "gpt-4o")
+        #expect(info.provider == "openai")
+    }
+
+    @Test func serveClientPutConfigJSONWrapsConfigEnvelope() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            #expect(request.url?.path == "/api/config")
+            #expect(request.httpMethod == "PUT")
+            let body = ServeURLProtocol.bodyString(of: request)
+            #expect(body.contains("\"config\""))
+            #expect(body.contains("max_turns"))
+            return (200, Data(#"{"ok":true}"#.utf8))
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        try await client.putConfigJSON(Data(#"{"agent":{"max_turns":150}}"#.utf8))
+    }
+
     @Test func serveClientListsWebhooksAndProfiles() async throws {
         let session = ServeURLProtocol.makeSession(handler: { request in
             switch request.url?.path {
