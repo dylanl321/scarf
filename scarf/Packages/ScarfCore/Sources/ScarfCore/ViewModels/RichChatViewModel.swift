@@ -1354,6 +1354,34 @@ public final class RichChatViewModel {
         hasUserSentPromptThisSession = false
     }
 
+    /// Install a Hermes-serve / TUI-gateway transcript onto the chat
+    /// surface. Used after `session.create` (usually empty) and
+    /// `session.resume` (full history). Replaces any prior messages —
+    /// callers that reconnect mid-chat and want to keep local bubbles
+    /// should pass `replaceMessages: false` and only refresh the id.
+    public func applyServeTranscript(
+        _ transcript: [HermesMessage],
+        liveSessionID: String,
+        replaceMessages: Bool = true,
+        reopenEngagementGate: Bool = false
+    ) {
+        setSessionId(liveSessionID)
+        if replaceMessages {
+            messages = transcript
+            oldestLoadedMessageID = transcript.map(\.id).min()
+            hasMoreHistory = false
+            let minId = transcript.map(\.id).min() ?? 0
+            nextLocalId = min(minId - 1, -1)
+            buildMessageGroups()
+        }
+        if reopenEngagementGate {
+            // Background reconnect of an already-active chat: accept
+            // live agent events without waiting for another Send.
+            hasUserSentPromptThisSession = true
+        }
+        clearACPErrorState()
+    }
+
     public func cleanup() async {
         stopActivePolling()
         debounceTask?.cancel()

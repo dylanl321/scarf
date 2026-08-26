@@ -321,14 +321,12 @@ struct ChatView: View {
         ScrollView {
             VStack(spacing: 12) {
                 if controller.vm.messages.isEmpty, controller.state == .ready {
-                    if controller.vm.sessionId != nil {
-                        // Resumed-session path: session ID is set but
-                        // no messages loaded. ACP-native sessions don't
-                        // persist their transcript to state.db (only
-                        // CLI/terminal sessions do), so resuming one
-                        // reconnects to the agent but can't surface
-                        // the history client-side. Explain to the user
-                        // rather than showing a blank canvas.
+                    if controller.openedByResuming {
+                        // Resumed-session path: session is attached but
+                        // no messages loaded (ACP-native / serve sessions
+                        // may not surface a client-side transcript).
+                        // Explain rather than showing a blank canvas —
+                        // and never show this for a brand-new session.
                         resumedEmptyState
                     } else {
                         emptyState
@@ -1114,7 +1112,7 @@ struct ChatView: View {
                 .foregroundStyle(ScarfColor.foregroundMuted)
                 .padding(.horizontal)
             Button("Retry") {
-                Task { await controller.start() }
+                Task { await controller.retryFailedConnection() }
             }
             .buttonStyle(ScarfPrimaryButton())
         }
@@ -1197,6 +1195,12 @@ final class ChatController {
     /// the resumed session is attributed to a registered project.
     private(set) var currentProjectName: String?
 
+    /// True when the current `.ready` chat was opened via Dashboard
+    /// resume (or an equivalent `startResuming` path), not a fresh
+    /// `session/new` / `session.create`. Drives the empty-state copy so
+    /// a brand-new chat never claims "Session resumed".
+    private(set) var openedByResuming: Bool = false
+
     /// Git branch of the project's working directory at session start
     /// (v2.5). Nil for non-project sessions and projects that aren't
     /// git repos / have git missing on the host. Surfaced as a small
@@ -1219,11 +1223,22 @@ final class ChatController {
     /// reaches `.ready` and cleared on explicit `stop()` so a
     /// user-initiated disconnect doesn't get auto-reconnected when
     /// network/scene events fire later.
+    ///
+    /// On Hermes Serve this is the **live** TUI-gateway runtime id
+    /// (`session_id`) used by `prompt.submit`. See `lastStoredSessionID`
+    /// for the durable key used by `session.resume`.
     private var lastActiveSessionID: String?
+    /// Durable Hermes Serve session key (`stored_session_id` /
+    /// `session_key`). Used to reattach after the WebSocket drops;
+    /// falls back to `lastActiveSessionID` when Hermes omitted it.
+    private var lastStoredSessionID: String?
     /// Optional project working directory of the currently-active
     /// session. Used as `cwd` on the recovery path so a project-
     /// scoped session reconnects with the right scope.
     private var lastProjectPath: String?
+    /// Last Dashboard / coordinator resume target. Retry after a
+    /// failed resume reuses this instead of opening a brand-new chat.
+    private var lastResumeTargetID: String?
 
     // Reconnect tuning — verbatim from the Mac implementation at
     // scarf/Features/Chat/ViewModels/ChatViewModel.swift:563-693.
@@ -1540,6 +1555,8 @@ final class ChatController {
         }
         if state == .connecting || state == .ready { return }
         guard await passModelPreflight(intent: .fresh) else { return }
+        openedByResuming = false
+        lastResumeTargetID = nil
         state = .connecting
         vm.reset()
         let client = makeClient()
@@ -1578,12 +1595,27 @@ final class ChatController {
             loadDraft()
             state = .ready
             lastActiveSessionID = sessionId
+            lastStoredSessionID = nil
             lastProjectPath = nil
         } catch {
             state = .failed(error.localizedDescription)
             await vm.recordACPFailure(error, client: client)
             await stop()
         }
+    }
+
+    /// Retry after `.failed`. Prefer reattaching the last session
+    /// (resume target or live id) over opening an unrelated new chat.
+    func retryFailedConnection() async {
+        if let resumeID = lastResumeTargetID {
+            await startResuming(sessionID: resumeID)
+            return
+        }
+        if let live = lastActiveSessionID ?? vm.sessionId {
+            attemptReconnect(sessionId: live)
+            return
+        }
+        await start()
     }
 
     /// Replace the current draft with `/<name>` (plus a trailing space
@@ -1848,7 +1880,10 @@ final class ChatController {
         // memory so reachability/scenePhase events don't try to
         // resurrect the dead chat.
         lastActiveSessionID = nil
+        lastStoredSessionID = nil
         lastProjectPath = nil
+        lastResumeTargetID = nil
+        openedByResuming = false
         isHandlingDisconnect = false
     }
 
@@ -1941,7 +1976,7 @@ final class ChatController {
             eventTask?.cancel(); eventTask = nil
             if let gw = serveGateway { Task { await gw.close() } }
             serveGateway = nil
-            if let saved = lastActiveSessionID ?? vm.sessionId {
+            if let saved = lastStoredSessionID ?? lastActiveSessionID ?? vm.sessionId {
                 attemptReconnect(sessionId: saved)
             } else {
                 state = .failed("Connection lost")
@@ -2019,8 +2054,14 @@ final class ChatController {
         case .active:
             // No session worth verifying.
             guard let id = lastActiveSessionID else { return }
-            // Already mid-recovery — let it finish.
-            if case .reconnecting = state { return }
+            // A real reconnect attempt (1…N) is already in flight —
+            // let it finish. `attempt == 0` is only the
+            // `pauseInBackground` sentinel and MUST fall through to
+            // verifyAndResume, otherwise the chat stays stuck on
+            // "Resuming…" forever after a brief app switch.
+            if case .reconnecting(let attempt, _) = state, attempt > 0 {
+                return
+            }
             await verifyAndResume(sessionId: id)
         case .inactive:
             break       // brief: control center, banners, split-screen
@@ -2084,7 +2125,7 @@ final class ChatController {
     /// when the user switched apps (gh#108 — "Chat connection failed").
     private func verifyAndResume(sessionId: String) async {
         if context.isServe {
-            attemptReconnect(sessionId: sessionId)
+            attemptReconnect(sessionId: lastStoredSessionID ?? sessionId)
             return
         }
         if let client {
@@ -2249,6 +2290,8 @@ final class ChatController {
         vm.reset()
         currentProjectName = nil
         currentGitBranch = nil
+        openedByResuming = false
+        lastResumeTargetID = nil
         // Quick-chat sessions don't have a project; clear any leftover
         // project-scoped slash commands from a prior session. Refresh
         // global Scarf commands too so `/scarf-*` still surfaces.
@@ -2423,8 +2466,18 @@ final class ChatController {
     }
 
     private func _startResumingImpl(sessionID: String) async {
+        lastResumeTargetID = sessionID
+        openedByResuming = true
+        if context.isServe {
+            await startResumingServe(sessionID: sessionID)
+            return
+        }
         guard await passModelPreflight(intent: .resume(sessionID: sessionID)) else { return }
         await stop()
+        // stop() clears resume bookkeeping — restore the intent flags
+        // so empty-state / Retry still know this was a resume.
+        lastResumeTargetID = sessionID
+        openedByResuming = true
         vm.reset()
         // Clear eagerly so a lingering project name from a prior
         // session doesn't flash onto the new header while the
@@ -2545,6 +2598,8 @@ final class ChatController {
             state = .failed(error.localizedDescription)
             await vm.recordACPFailure(error, client: client)
             await stop()
+            lastResumeTargetID = sessionID
+            openedByResuming = true
         }
     }
 
@@ -2563,6 +2618,10 @@ final class ChatController {
 
     private func reconnectServe(sessionId: String) async {
         defer { isHandlingDisconnect = false }
+        let resumeTarget = lastStoredSessionID?.isEmpty == false
+            ? lastStoredSessionID!
+            : sessionId
+        let keepLocalTranscript = !vm.messages.isEmpty
         for attempt in 1...Self.maxReconnectAttempts {
             guard !Task.isCancelled else { return }
             state = .reconnecting(attempt: attempt, of: Self.maxReconnectAttempts)
@@ -2575,19 +2634,20 @@ final class ChatController {
                 guard !Task.isCancelled else { return }
             }
             do {
-                guard let cfg = context.serveConfig else { throw HermesServeError.notAServeContext }
-                let http = HermesServeClient(config: cfg)
-                try await http.authenticate(serverID: context.id, username: cfg.username)
-                let wsURL = try await http.websocketURL()
-                let gw = TUIGatewayClient(url: wsURL)
-                try await gw.connect()
-                serveGateway = gw
-                startServeEventLoop(gateway: gw)
-                vm.setSessionId(sessionId)
-                lastActiveSessionID = sessionId
+                let bind = try await openServeGatewayAndResume(
+                    targetSessionID: resumeTarget,
+                    replaceMessages: !keepLocalTranscript,
+                    reopenEngagementGate: keepLocalTranscript
+                )
+                lastActiveSessionID = bind.liveSessionID
+                lastStoredSessionID = bind.resumeTargetID
                 state = .ready
+                Self.logger.info("Serve reconnected on attempt \(attempt)")
                 return
             } catch {
+                Self.logger.warning(
+                    "Serve reconnect attempt \(attempt) failed: \(error.localizedDescription, privacy: .public)"
+                )
                 if attempt == Self.maxReconnectAttempts {
                     state = .failed(error.localizedDescription)
                 }
@@ -2597,29 +2657,112 @@ final class ChatController {
 
     private func startServe(projectPath: String? = nil, projectName: String? = nil) async {
         if state == .connecting || state == .ready { return }
+        openedByResuming = false
+        lastResumeTargetID = nil
         state = .connecting
         vm.reset()
-        guard let cfg = context.serveConfig else {
-            state = .failed(HermesServeError.notAServeContext.errorDescription ?? "Not a Hermes URL server.")
-            return
-        }
+        currentProjectName = projectName
+        lastProjectPath = projectPath
         do {
-            let http = HermesServeClient(config: cfg)
-            try await http.authenticate(serverID: context.id, username: cfg.username)
-            let wsURL = try await http.websocketURL()
-            let gw = TUIGatewayClient(url: wsURL)
+            let bind = try await openServeGatewayAndCreate()
+            vm.applyServeTranscript(
+                bind.messages,
+                liveSessionID: bind.liveSessionID,
+                replaceMessages: true,
+                reopenEngagementGate: false
+            )
+            loadDraft()
+            lastActiveSessionID = bind.liveSessionID
+            lastStoredSessionID = bind.resumeTargetID
+            state = .ready
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    private func startResumingServe(sessionID: String) async {
+        await stop()
+        lastResumeTargetID = sessionID
+        openedByResuming = true
+        vm.reset()
+        currentProjectName = nil
+        currentGitBranch = nil
+        lastProjectPath = nil
+        state = .connecting
+        do {
+            let bind = try await openServeGatewayAndResume(
+                targetSessionID: sessionID,
+                replaceMessages: true,
+                reopenEngagementGate: false
+            )
+            loadDraft()
+            lastActiveSessionID = bind.liveSessionID
+            lastStoredSessionID = bind.resumeTargetID
+            state = .ready
+        } catch {
+            state = .failed(error.localizedDescription)
+            lastResumeTargetID = sessionID
+            openedByResuming = true
+        }
+    }
+
+    /// Authenticate + open `/api/ws`, then `session.create`.
+    private func openServeGatewayAndCreate() async throws -> TUIGatewaySessionBind {
+        guard let cfg = context.serveConfig else {
+            throw HermesServeError.notAServeContext
+        }
+        let http = HermesServeClient(config: cfg)
+        try await http.authenticate(serverID: context.id, username: cfg.username)
+        let wsURL = try await http.websocketURL()
+        let gw = TUIGatewayClient(url: wsURL)
+        do {
             try await gw.connect()
             serveGateway = gw
             startServeEventLoop(gateway: gw)
-            let sessionId = try await gw.createSession()
-            vm.setSessionId(sessionId)
-            loadDraft()
-            state = .ready
-            lastActiveSessionID = sessionId
-            lastProjectPath = projectPath
-            currentProjectName = projectName
+            return try await gw.createSession(profile: cfg.profile)
         } catch {
-            state = .failed(error.localizedDescription)
+            eventTask?.cancel(); eventTask = nil
+            await gw.close()
+            serveGateway = nil
+            throw error
+        }
+    }
+
+    /// Authenticate + open `/api/ws`, then `session.resume` against
+    /// `targetSessionID` (durable key preferred). Applies the bind to
+    /// the VM before returning.
+    private func openServeGatewayAndResume(
+        targetSessionID: String,
+        replaceMessages: Bool,
+        reopenEngagementGate: Bool
+    ) async throws -> TUIGatewaySessionBind {
+        guard let cfg = context.serveConfig else {
+            throw HermesServeError.notAServeContext
+        }
+        let http = HermesServeClient(config: cfg)
+        try await http.authenticate(serverID: context.id, username: cfg.username)
+        let wsURL = try await http.websocketURL()
+        let gw = TUIGatewayClient(url: wsURL)
+        do {
+            try await gw.connect()
+            serveGateway = gw
+            startServeEventLoop(gateway: gw)
+            let bind = try await gw.resumeSession(
+                sessionID: targetSessionID,
+                profile: cfg.profile
+            )
+            vm.applyServeTranscript(
+                bind.messages,
+                liveSessionID: bind.liveSessionID,
+                replaceMessages: replaceMessages,
+                reopenEngagementGate: reopenEngagementGate
+            )
+            return bind
+        } catch {
+            eventTask?.cancel(); eventTask = nil
+            await gw.close()
+            serveGateway = nil
+            throw error
         }
     }
 

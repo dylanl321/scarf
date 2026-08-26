@@ -455,6 +455,86 @@ import Foundation
         #expect(!HermesCapabilities.parseLine("Hermes Agent v0.17.0 (2026.6.19)").hasHermesServe)
         #expect(!HermesCapabilities.empty.hasHermesServe)
     }
+
+    @Test func parseCreateBindKeepsLiveAndStoredIDs() throws {
+        let json = """
+        {
+          "session_id": "a1b2c3d4",
+          "stored_session_id": "hermes-durable-key",
+          "message_count": 0,
+          "messages": []
+        }
+        """.data(using: .utf8)!
+        let bind = try TUIGatewaySessionParsing.parseBind(from: json, defaultResumed: false)
+        #expect(bind.liveSessionID == "a1b2c3d4")
+        #expect(bind.storedSessionID == "hermes-durable-key")
+        #expect(bind.resumeTargetID == "hermes-durable-key")
+        #expect(!bind.resumed)
+        #expect(bind.messages.isEmpty)
+    }
+
+    @Test func parseResumeBindMapsTranscript() throws {
+        let json = """
+        {
+          "session_id": "live99",
+          "session_key": "stored-abc",
+          "resumed": "stored-abc",
+          "messages": [
+            {"role": "user", "text": "hi", "row_id": 10, "timestamp": 1700000000},
+            {"role": "assistant", "text": "hello", "row_id": 11, "reasoning": "think"},
+            {"role": "system", "text": "ignore me", "display_kind": "hidden"}
+          ]
+        }
+        """.data(using: .utf8)!
+        let bind = try TUIGatewaySessionParsing.parseBind(from: json, defaultResumed: true)
+        #expect(bind.liveSessionID == "live99")
+        #expect(bind.storedSessionID == "stored-abc")
+        #expect(bind.resumed)
+        #expect(bind.messages.count == 2)
+        #expect(bind.messages[0].isUser)
+        #expect(bind.messages[0].content == "hi")
+        #expect(bind.messages[1].isAssistant)
+        #expect(bind.messages[1].reasoning == "think")
+    }
+
+#if canImport(SQLite3)
+    @Test func applyServeTranscriptReplacesMessages() {
+        let ctx = ServerContext(
+            id: ServerID(),
+            displayName: "t",
+            kind: .serve(HermesServeConfig(baseURL: "http://example:9119"))
+        )
+        let vm = RichChatViewModel(context: ctx)
+        let rows = [
+            HermesMessage(
+                id: 1,
+                sessionId: "live",
+                role: "user",
+                content: "yo",
+                toolCallId: nil,
+                toolCalls: [],
+                toolName: nil,
+                timestamp: Date(),
+                tokenCount: nil,
+                finishReason: nil,
+                reasoning: nil
+            ),
+        ]
+        vm.applyServeTranscript(rows, liveSessionID: "live")
+        #expect(vm.sessionId == "live")
+        #expect(vm.messages.count == 1)
+        #expect(vm.messages[0].content == "yo")
+
+        vm.applyServeTranscript(
+            [],
+            liveSessionID: "live2",
+            replaceMessages: false,
+            reopenEngagementGate: true
+        )
+        #expect(vm.sessionId == "live2")
+        #expect(vm.messages.count == 1) // preserved
+    }
+#endif
 }
 
 /// URLProtocol stub — no live network.
