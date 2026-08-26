@@ -175,7 +175,7 @@ struct ScarfGoTabRoot: View {
             // 3 — Chat: the reason the app is on your phone. Centered
             // among the 5 tabs for thumb reach + visual prominence.
             NavigationStack {
-                ChatView(config: cfg, key: key)
+                ChatTabHost(config: cfg, key: key)
             }
             .tabItem {
                 Label("Chat", systemImage: "bubble.left.and.bubble.right.fill")

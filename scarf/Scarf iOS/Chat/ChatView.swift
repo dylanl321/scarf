@@ -14,6 +14,28 @@ import PhotosUI
 // so ScarfCore-agnostic static analysis doesn't choke.
 #if canImport(SQLite3)
 
+/// Owns the Chat tab's `ChatController` so TabView remounts of the
+/// leaf `ChatView` cannot recreate the ACP/Serve connection. Profile
+/// switches still rebuild this host via `ScarfGoTabRoot`'s
+/// `.id(selectedProfile…)`.
+struct ChatTabHost: View {
+    let config: IOSServerConfig
+    let key: SSHKeyBundle?
+
+    @State private var controller: ChatController
+
+    init(config: IOSServerConfig, key: SSHKeyBundle?) {
+        self.config = config
+        self.key = key
+        let ctx = config.toServerContext(id: ChatView.sharedContextID)
+        _controller = State(initialValue: ChatController(context: ctx))
+    }
+
+    var body: some View {
+        ChatView(config: config, key: key, controller: controller)
+    }
+}
+
 /// M4 iOS Chat: streams JSON-RPC over a Citadel SSH exec channel to a
 /// remote `hermes acp` process. Reuses ScarfCore's `RichChatViewModel`
 /// state machine (from M0d) + `ACPClient` (from M1).
@@ -28,8 +50,10 @@ struct ChatView: View {
     @Environment(\.scarfGoCoordinator) private var coordinator
     @Environment(\.serverContext) private var envContext
     @Environment(\.hermesCapabilities) private var capabilitiesStore
-    @State private var controller: ChatController
+    @Bindable var controller: ChatController
     @State private var showProjectPicker = false
+    @State private var showSessionsSheet = false
+    @State private var sessionsLoader: ChatSessionsLoader
     @State private var showSlashCommandsSheet = false
     /// Drives the inline slash-command autocomplete above the composer.
     /// Toggled by `RichChatViewModel.shouldShowSlashMenu(text:)` on draft
@@ -100,17 +124,35 @@ struct ChatView: View {
     /// blocking access to the toolbar nav button on small phones.)
     @FocusState private var composerFocused: Bool
 
-    init(config: IOSServerConfig, key: SSHKeyBundle?) {
+    /// Idle landing vs live transcript. Connecting / reconnecting /
+    /// failed keep the active chrome so the user sees progress or Retry
+    /// instead of bouncing back to the landing.
+    private var showsIdleLanding: Bool {
+        controller.state == .idle
+    }
+
+    private var navigationTitleText: String {
+        if let title = controller.sessionDisplayTitle, !title.isEmpty {
+            return title
+        }
+        if let project = controller.currentProjectName, !project.isEmpty {
+            return project
+        }
+        return "Chat"
+    }
+
+    init(config: IOSServerConfig, key: SSHKeyBundle?, controller: ChatController) {
         self.config = config
         self.key = key
+        self.controller = controller
         let ctx = config.toServerContext(id: Self.sharedContextID)
-        _controller = State(initialValue: ChatController(context: ctx))
+        _sessionsLoader = State(initialValue: ChatSessionsLoader(context: ctx))
     }
 
     /// Same UUID DashboardView uses, so the transport's cached SSH
     /// connection (if still open) can be reused when the user hops
     /// between Chat and Dashboard.
-    private static let sharedContextID: ServerID = ServerID(
+    static let sharedContextID: ServerID = ServerID(
         uuidString: "00000000-0000-0000-0000-0000000000A1"
     )!
 
@@ -120,24 +162,51 @@ struct ChatView: View {
         // here costs ~one signpost emit + ring-buffer append (off the
         // hot path otherwise).
         let _: Void = ScarfMon.event(.chatRender, "ios.ChatView.body")
-        return VStack(spacing: 0) {
-            connectionBanner
-            errorBanner
-            projectContextBar
-            messageList
-            Divider()
-            if let hint = controller.vm.transientHint {
-                steeringToast(hint)
+        return Group {
+            if showsIdleLanding {
+                ChatIdleLanding(
+                    loader: sessionsLoader,
+                    onContinue: { session in
+                        resumeFromList(session)
+                    },
+                    onNew: {
+                        showProjectPicker = true
+                    },
+                    onSeeAll: {
+                        showSessionsSheet = true
+                    },
+                    onSelect: { session in
+                        resumeFromList(session)
+                    }
+                )
+            } else {
+                VStack(spacing: 0) {
+                    connectionBanner
+                    errorBanner
+                    projectContextBar
+                    messageList
+                    Divider()
+                    if let hint = controller.vm.transientHint {
+                        steeringToast(hint)
+                    }
+                    composer
+                }
             }
-            composer
         }
         .background(ScarfColor.backgroundPrimary.ignoresSafeArea())
-        .navigationTitle("Chat")
+        .navigationTitle(navigationTitleText)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            // Principal: "Chat" title + small folder chip below when
-            // the current session is project-attributed. iOS-native
-            // equivalent of Mac's SessionInfoBar project-chip pattern.
+            if !showsIdleLanding {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showSessionsSheet = true
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .accessibilityLabel("Sessions")
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showProjectPicker = true
@@ -145,6 +214,7 @@ struct ChatView: View {
                     Image(systemName: "plus.bubble")
                 }
                 .disabled(controller.state == .connecting)
+                .accessibilityLabel("New chat")
             }
         }
         .sheet(isPresented: $showProjectPicker) {
@@ -155,6 +225,24 @@ struct ChatView: View {
                 },
                 onProject: { project in
                     Task { await controller.resetAndStartInProject(project) }
+                }
+            )
+        }
+        .sheet(isPresented: $showSessionsSheet) {
+            ChatSessionsSheet(
+                loader: sessionsLoader,
+                activeSessionID: controller.activeListSessionID,
+                isAgentWorking: controller.vm.isAgentWorking,
+                onSelect: { session in
+                    showSessionsSheet = false
+                    resumeFromList(session)
+                },
+                onNew: {
+                    showSessionsSheet = false
+                    showProjectPicker = true
+                },
+                onDismiss: {
+                    showSessionsSheet = false
                 }
             )
         }
@@ -176,14 +264,20 @@ struct ChatView: View {
             // consume + clear here on first appear. Resume wins over
             // project-chat if both somehow get set in a single hop —
             // but in practice the coordinator never sets both at once.
+            //
+            // Do NOT call `start()` when already live or when idle with
+            // no handoff — idle landing loads recents instead of
+            // silently creating an ACP/Serve session.
+            //
+            // Fire-and-forget (not await in this `.task`) so a tab hop
+            // that cancels the view task cannot abort an in-flight
+            // connect — same pattern as the onChange handoff hooks.
             if let sessionID = coordinator?.pendingResumeSessionID {
                 coordinator?.pendingResumeSessionID = nil
-                await controller.startResuming(sessionID: sessionID)
+                Task { await controller.startResuming(sessionID: sessionID) }
             } else if let projectPath = coordinator?.pendingProjectChat {
                 coordinator?.pendingProjectChat = nil
-                await consumePendingProjectChat(projectPath)
-            } else {
-                await controller.start()
+                Task { await consumePendingProjectChat(projectPath) }
             }
         }
         // React to coordinator changes that happen while Chat is
@@ -294,6 +388,11 @@ struct ChatView: View {
             )
         }.value
         await controller.resetAndStartInProject(entry)
+    }
+
+    private func resumeFromList(_ session: HermesSession) {
+        controller.noteSessionDisplayTitle(sessionsLoader.preview(for: session))
+        Task { await controller.startResuming(sessionID: session.id) }
     }
 
     // MARK: - Subviews
@@ -1137,6 +1236,33 @@ struct ChatView: View {
 /// screen. Kept out of `ChatView.body` so SwiftUI view re-renders don't
 /// spawn or tear down SSH connections unintentionally.
 @Observable
+/// Non-observable connection bookkeeping for `ChatController`. Kept
+/// outside the `@Observable` surface so `deinit` can cancel tasks and
+/// stop ACP/Serve clients without an `isolated deinit` (which the
+/// Observation macro rejects on `@MainActor` types).
+private final class ChatConnectionHandles: @unchecked Sendable {
+    var client: ACPClient?
+    var serveGateway: TUIGatewayClient?
+    var eventTask: Task<Void, Never>?
+    var healthMonitorTask: Task<Void, Never>?
+    var reconnectTask: Task<Void, Never>?
+    var pendingDraftSave: Task<Void, Never>?
+
+    func teardownOnDeinit() {
+        eventTask?.cancel()
+        healthMonitorTask?.cancel()
+        reconnectTask?.cancel()
+        pendingDraftSave?.cancel()
+        if let client {
+            Task { await client.stop() }
+        }
+        if let serveGateway {
+            Task { await serveGateway.close() }
+        }
+    }
+}
+
+@Observable
 @MainActor
 final class ChatController {
     enum State: Equatable {
@@ -1181,12 +1307,13 @@ final class ChatController {
     /// `confirmModelPreflight` writes the chosen values to config.yaml
     /// so the chat the user originally tried to open lands without
     /// them having to click the project row again.
+    @ObservationIgnored
+    private var pendingStartIntent: PendingStart?
     private enum PendingStart {
         case fresh
         case project(path: String, name: String)
         case resume(sessionID: String)
     }
-    private var pendingStartIntent: PendingStart?
     /// Display name of the Scarf project this session is scoped to,
     /// or nil for "quick chat" / global sessions. Surfaced as a
     /// subtitle under the "Chat" title in the nav bar so users can
@@ -1194,6 +1321,11 @@ final class ChatController {
     /// Set by `resetAndStartInProject` and by `startResuming` when
     /// the resumed session is attributed to a registered project.
     private(set) var currentProjectName: String?
+
+    /// Nav-title override from the sessions list (preview / title).
+    /// Cleared on new chat; resume from Dashboard without a known
+    /// title leaves this nil and the nav falls back to project / "Chat".
+    private(set) var sessionDisplayTitle: String?
 
     /// True when the current `.ready` chat was opened via Dashboard
     /// resume (or an equivalent `startResuming` path), not a fresh
@@ -1210,14 +1342,45 @@ final class ChatController {
     /// Public so the surrounding `ChatView` can read `displayName`
     /// when presenting sheets (e.g., the model preflight). Still
     /// `let` — set once at init, never mutated after.
+    @ObservationIgnored
     let context: ServerContext
-    private var client: ACPClient?
-    private var serveGateway: TUIGatewayClient?
-    private var eventTask: Task<Void, Never>?
-    private var healthMonitorTask: Task<Void, Never>?
-    private var reconnectTask: Task<Void, Never>?
+    /// Connection resources live in an unchecked box so `deinit` can
+    /// cancel them without `isolated deinit` — that form conflicts with
+    /// the `@Observable` macro on `@MainActor` types (IPA archive).
+    @ObservationIgnored
+    private let connection = ChatConnectionHandles()
+    private var client: ACPClient? {
+        get { connection.client }
+        set { connection.client = newValue }
+    }
+    private var serveGateway: TUIGatewayClient? {
+        get { connection.serveGateway }
+        set { connection.serveGateway = newValue }
+    }
+    private var eventTask: Task<Void, Never>? {
+        get { connection.eventTask }
+        set { connection.eventTask = newValue }
+    }
+    private var healthMonitorTask: Task<Void, Never>? {
+        get { connection.healthMonitorTask }
+        set { connection.healthMonitorTask = newValue }
+    }
+    private var reconnectTask: Task<Void, Never>? {
+        get { connection.reconnectTask }
+        set { connection.reconnectTask = newValue }
+    }
+    @ObservationIgnored
     private var isHandlingDisconnect = false
-    private var pendingDraftSave: Task<Void, Never>?
+    private var pendingDraftSave: Task<Void, Never>? {
+        get { connection.pendingDraftSave }
+        set { connection.pendingDraftSave = newValue }
+    }
+
+    /// Bumped at the top of every start/resume pipeline so a newer
+    /// sheet tap supersedes an in-flight connect (Mac
+    /// `sessionStartGeneration` / `startStillCurrent`).
+    @ObservationIgnored
+    private var sessionStartGeneration = 0
 
     /// Session id of the currently-active chat. Saved when state
     /// reaches `.ready` and cleared on explicit `stop()` so a
@@ -1227,18 +1390,28 @@ final class ChatController {
     /// On Hermes Serve this is the **live** TUI-gateway runtime id
     /// (`session_id`) used by `prompt.submit`. See `lastStoredSessionID`
     /// for the durable key used by `session.resume`.
+    @ObservationIgnored
     private var lastActiveSessionID: String?
     /// Durable Hermes Serve session key (`stored_session_id` /
     /// `session_key`). Used to reattach after the WebSocket drops;
     /// falls back to `lastActiveSessionID` when Hermes omitted it.
+    @ObservationIgnored
     private var lastStoredSessionID: String?
     /// Optional project working directory of the currently-active
     /// session. Used as `cwd` on the recovery path so a project-
     /// scoped session reconnects with the right scope.
+    @ObservationIgnored
     private var lastProjectPath: String?
     /// Last Dashboard / coordinator resume target. Retry after a
     /// failed resume reuses this instead of opening a brand-new chat.
+    @ObservationIgnored
     private var lastResumeTargetID: String?
+
+    /// Id to highlight in the Sessions sheet — durable resume target
+    /// when known (Serve), else the live ACP / VM session id.
+    var activeListSessionID: String? {
+        lastResumeTargetID ?? lastStoredSessionID ?? lastActiveSessionID ?? vm.sessionId
+    }
 
     // Reconnect tuning — verbatim from the Mac implementation at
     // scarf/Features/Chat/ViewModels/ChatViewModel.swift:563-693.
@@ -1322,6 +1495,37 @@ final class ChatController {
     init(context: ServerContext) {
         self.context = context
         self.vm = RichChatViewModel(context: context)
+    }
+
+    func noteSessionDisplayTitle(_ title: String?) {
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        sessionDisplayTitle = (trimmed?.isEmpty == false) ? trimmed : nil
+    }
+
+    // MARK: - Start supersede (Mac sessionStartGeneration)
+
+    @discardableResult
+    private func beginStartIntent() -> Int {
+        sessionStartGeneration &+= 1
+        return sessionStartGeneration
+    }
+
+    /// True while `intent` is still the newest start. When superseded,
+    /// stops the abandoned client/gateway and returns false so the
+    /// caller abandons without clobbering the newer start's state.
+    private func startStillCurrent(
+        _ intent: Int,
+        client: ACPClient? = nil,
+        gateway: TUIGatewayClient? = nil
+    ) -> Bool {
+        if intent == sessionStartGeneration { return true }
+        if let client {
+            Task { await client.stop() }
+        }
+        if let gateway {
+            Task { await gateway.close() }
+        }
+        return false
     }
 
     /// Pre-flight: returns true when `config.yaml` has both
@@ -1530,6 +1734,7 @@ final class ChatController {
     /// `forIOSApp` one, so unit tests can drive the real start()/send()
     /// path over an in-memory ACP channel. Nil in production. Mirrors
     /// `MiniAppAgentSession.clientFactory`.
+    @ObservationIgnored
     var clientFactory: ((_ projectCwd: String?) -> ACPClient)?
 
     private func makeClient(projectCwd: String? = nil) -> ACPClient {
@@ -1554,9 +1759,12 @@ final class ChatController {
             return
         }
         if state == .connecting || state == .ready { return }
+        let intent = beginStartIntent()
         guard await passModelPreflight(intent: .fresh) else { return }
+        guard startStillCurrent(intent) else { return }
         openedByResuming = false
         lastResumeTargetID = nil
+        sessionDisplayTitle = nil
         state = .connecting
         vm.reset()
         let client = makeClient()
@@ -1573,10 +1781,12 @@ final class ChatController {
         do {
             try await client.start()
         } catch {
+            guard startStillCurrent(intent, client: client) else { return }
             state = .failed(error.localizedDescription)
             await vm.recordACPFailure(error, client: client)
             return
         }
+        guard startStillCurrent(intent, client: client) else { return }
 
         // Start streaming ACP events into the view-model BEFORE we
         // send session/new, so the `available_commands_update`
@@ -1590,7 +1800,9 @@ final class ChatController {
         // directory — Hermes defaults to that for tool scoping.
         do {
             let home = await context.resolvedUserHome()
+            guard startStillCurrent(intent, client: client) else { return }
             let sessionId = try await client.newSession(cwd: home)
+            guard startStillCurrent(intent, client: client) else { return }
             vm.setSessionId(sessionId)
             loadDraft()
             state = .ready
@@ -1598,6 +1810,7 @@ final class ChatController {
             lastStoredSessionID = nil
             lastProjectPath = nil
         } catch {
+            guard startStillCurrent(intent, client: client) else { return }
             state = .failed(error.localizedDescription)
             await vm.recordACPFailure(error, client: client)
             await stop()
@@ -1846,19 +2059,11 @@ final class ChatController {
     /// this the remote `hermes acp` process + SSH channel would linger after
     /// the view is gone. `deinit` can't await, so cancel the tasks
     /// synchronously and fire-and-forget the actor `stop()` — the same
-    /// pattern `CitadelServerTransport.deinit` uses. `isolated` so it runs
-    /// on the MainActor and can touch the actor-isolated task handles.
-    isolated deinit {
-        eventTask?.cancel()
-        healthMonitorTask?.cancel()
-        reconnectTask?.cancel()
-        pendingDraftSave?.cancel()
-        if let client {
-            Task { await client.stop() }
-        }
-        if let serveGateway {
-            Task { await serveGateway.close() }
-        }
+    /// pattern `CitadelServerTransport.deinit` uses. Teardown goes through
+    /// `ChatConnectionHandles` (not `isolated deinit`) so `@Observable`
+    /// can expand cleanly on this `@MainActor` type.
+    deinit {
+        connection.teardownOnDeinit()
     }
 
     /// Stop the current session + tear down the SSH exec channel.
@@ -2286,10 +2491,12 @@ final class ChatController {
 
     /// User tapped "New chat". Stop, reset the VM, start again.
     func resetAndStartNewSession() async {
+        beginStartIntent()
         await stop()
         vm.reset()
         currentProjectName = nil
         currentGitBranch = nil
+        sessionDisplayTitle = nil
         openedByResuming = false
         lastResumeTargetID = nil
         // Quick-chat sessions don't have a project; clear any leftover
@@ -2306,10 +2513,12 @@ final class ChatController {
     /// acp`, so Hermes sees the project context at boot. Records the
     /// returned session id in the attribution sidecar.
     func resetAndStartInProject(_ project: ProjectEntry) async {
+        beginStartIntent()
         await stop()
         vm.reset()
         currentProjectName = project.name
         currentGitBranch = nil
+        sessionDisplayTitle = project.name
         // Pull any project-authored slash commands at
         // <project.path>/.scarf/slash-commands/ into the chat menu.
         // Async + non-fatal — degrades cleanly on SFTP failures (logged).
@@ -2382,6 +2591,7 @@ final class ChatController {
             return
         }
         if state == .connecting || state == .ready { return }
+        let startIntent = beginStartIntent()
         let intent: PendingStart
         if let projectPath, let projectName {
             intent = .project(path: projectPath, name: projectName)
@@ -2389,6 +2599,7 @@ final class ChatController {
             intent = .fresh
         }
         guard await passModelPreflight(intent: intent) else { return }
+        guard startStillCurrent(startIntent) else { return }
         state = .connecting
         let client = makeClient(projectCwd: projectPath)
         self.client = client
@@ -2399,10 +2610,12 @@ final class ChatController {
         do {
             try await client.start()
         } catch {
+            guard startStillCurrent(startIntent, client: client) else { return }
             state = .failed(error.localizedDescription)
             await vm.recordACPFailure(error, client: client)
             return
         }
+        guard startStillCurrent(startIntent, client: client) else { return }
 
         startACPEventLoop(client: client)
         startHealthMonitor(client: client)
@@ -2416,7 +2629,9 @@ final class ChatController {
             } else {
                 cwd = await context.resolvedUserHome()
             }
+            guard startStillCurrent(startIntent, client: client) else { return }
             let sessionId = try await client.newSession(cwd: cwd)
+            guard startStillCurrent(startIntent, client: client) else { return }
             vm.setSessionId(sessionId)
             loadDraft()
             state = .ready
@@ -2442,6 +2657,7 @@ final class ChatController {
             }
             _ = projectName // reserved for future chat-header chip
         } catch {
+            guard startStillCurrent(startIntent, client: client) else { return }
             state = .failed(error.localizedDescription)
             await vm.recordACPFailure(error, client: client)
             await stop()
@@ -2466,14 +2682,17 @@ final class ChatController {
     }
 
     private func _startResumingImpl(sessionID: String) async {
+        let intent = beginStartIntent()
         lastResumeTargetID = sessionID
         openedByResuming = true
         if context.isServe {
-            await startResumingServe(sessionID: sessionID)
+            await startResumingServe(sessionID: sessionID, startIntent: intent)
             return
         }
         guard await passModelPreflight(intent: .resume(sessionID: sessionID)) else { return }
+        guard startStillCurrent(intent) else { return }
         await stop()
+        guard startStillCurrent(intent) else { return }
         // stop() clears resume bookkeeping — restore the intent flags
         // so empty-state / Retry still know this was a resume.
         lastResumeTargetID = sessionID
@@ -2505,6 +2724,7 @@ final class ChatController {
             else { return nil }
             return (path: path, name: name)
         }.value
+        guard startStillCurrent(intent) else { return }
         currentProjectName = resolved?.name
         currentGitBranch = nil
         vm.loadProjectScopedCommands(at: resolved?.path)
@@ -2528,6 +2748,7 @@ final class ChatController {
         // boot). Project-attributed sessions only.
         if let resumePath = resolved?.path {
             await writeProjectContextBlock(projectPath: resumePath, projectName: resolved?.name ?? "")
+            guard startStillCurrent(intent) else { return }
         }
 
         state = .connecting
@@ -2540,10 +2761,12 @@ final class ChatController {
         do {
             try await client.start()
         } catch {
+            guard startStillCurrent(intent, client: client) else { return }
             state = .failed(error.localizedDescription)
             await vm.recordACPFailure(error, client: client)
             return
         }
+        guard startStillCurrent(intent, client: client) else { return }
 
         startACPEventLoop(client: client)
         startHealthMonitor(client: client)
@@ -2559,6 +2782,7 @@ final class ChatController {
             } else {
                 cwd = await context.resolvedUserHome()
             }
+            guard startStillCurrent(intent, client: client) else { return }
             // `session/load` only — `session/resume` restores through
             // the same server path but CREATES an orphan session when
             // the id isn't restorable (t-217da62b; see
@@ -2577,8 +2801,10 @@ final class ChatController {
             do {
                 resolvedID = try await client.loadSession(cwd: cwd, sessionId: sessionID)
             } catch {
+                guard startStillCurrent(intent, client: client) else { return }
                 resolvedID = try await client.newSession(cwd: cwd)
             }
+            guard startStillCurrent(intent, client: client) else { return }
             vm.setSessionId(resolvedID)
             loadDraft()
             // Pull the transcript out of state.db so the user sees
@@ -2591,10 +2817,12 @@ final class ChatController {
                 sessionId: sessionID,
                 acpSessionId: resolvedID == sessionID ? nil : resolvedID
             )
+            guard startStillCurrent(intent, client: client) else { return }
             state = .ready
             lastActiveSessionID = resolvedID
             lastProjectPath = resolved?.path
         } catch {
+            guard startStillCurrent(intent, client: client) else { return }
             state = .failed(error.localizedDescription)
             await vm.recordACPFailure(error, client: client)
             await stop()
@@ -2657,14 +2885,21 @@ final class ChatController {
 
     private func startServe(projectPath: String? = nil, projectName: String? = nil) async {
         if state == .connecting || state == .ready { return }
+        let intent = beginStartIntent()
         openedByResuming = false
         lastResumeTargetID = nil
+        if let projectName {
+            sessionDisplayTitle = projectName
+        } else {
+            sessionDisplayTitle = nil
+        }
         state = .connecting
         vm.reset()
         currentProjectName = projectName
         lastProjectPath = projectPath
         do {
             let bind = try await openServeGatewayAndCreate()
+            guard startStillCurrent(intent, gateway: serveGateway) else { return }
             vm.applyServeTranscript(
                 bind.messages,
                 liveSessionID: bind.liveSessionID,
@@ -2676,12 +2911,14 @@ final class ChatController {
             lastStoredSessionID = bind.resumeTargetID
             state = .ready
         } catch {
+            guard startStillCurrent(intent, gateway: serveGateway) else { return }
             state = .failed(error.localizedDescription)
         }
     }
 
-    private func startResumingServe(sessionID: String) async {
+    private func startResumingServe(sessionID: String, startIntent: Int) async {
         await stop()
+        guard startStillCurrent(startIntent) else { return }
         lastResumeTargetID = sessionID
         openedByResuming = true
         vm.reset()
@@ -2695,11 +2932,13 @@ final class ChatController {
                 replaceMessages: true,
                 reopenEngagementGate: false
             )
+            guard startStillCurrent(startIntent, gateway: serveGateway) else { return }
             loadDraft()
             lastActiveSessionID = bind.liveSessionID
             lastStoredSessionID = bind.resumeTargetID
             state = .ready
         } catch {
+            guard startStillCurrent(startIntent, gateway: serveGateway) else { return }
             state = .failed(error.localizedDescription)
             lastResumeTargetID = sessionID
             openedByResuming = true
