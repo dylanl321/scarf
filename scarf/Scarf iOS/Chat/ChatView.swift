@@ -1236,6 +1236,32 @@ struct ChatView: View {
 /// screen. Kept out of `ChatView.body` so SwiftUI view re-renders don't
 /// spawn or tear down SSH connections unintentionally.
 @Observable
+/// Non-observable connection bookkeeping for `ChatController`. Kept
+/// outside the `@Observable` surface so `deinit` can cancel tasks and
+/// stop ACP/Serve clients without an `isolated deinit` (which the
+/// Observation macro rejects on `@MainActor` types).
+private final class ChatConnectionHandles: @unchecked Sendable {
+    var client: ACPClient?
+    var serveGateway: TUIGatewayClient?
+    var eventTask: Task<Void, Never>?
+    var healthMonitorTask: Task<Void, Never>?
+    var reconnectTask: Task<Void, Never>?
+    var pendingDraftSave: Task<Void, Never>?
+
+    func teardownOnDeinit() {
+        eventTask?.cancel()
+        healthMonitorTask?.cancel()
+        reconnectTask?.cancel()
+        pendingDraftSave?.cancel()
+        if let client {
+            Task { await client.stop() }
+        }
+        if let serveGateway {
+            Task { await serveGateway.close() }
+        }
+    }
+}
+
 @Observable
 @MainActor
 final class ChatController {
@@ -1281,12 +1307,13 @@ final class ChatController {
     /// `confirmModelPreflight` writes the chosen values to config.yaml
     /// so the chat the user originally tried to open lands without
     /// them having to click the project row again.
+    @ObservationIgnored
+    private var pendingStartIntent: PendingStart?
     private enum PendingStart {
         case fresh
         case project(path: String, name: String)
         case resume(sessionID: String)
     }
-    private var pendingStartIntent: PendingStart?
     /// Display name of the Scarf project this session is scoped to,
     /// or nil for "quick chat" / global sessions. Surfaced as a
     /// subtitle under the "Chat" title in the nav bar so users can
@@ -1315,18 +1342,44 @@ final class ChatController {
     /// Public so the surrounding `ChatView` can read `displayName`
     /// when presenting sheets (e.g., the model preflight). Still
     /// `let` — set once at init, never mutated after.
+    @ObservationIgnored
     let context: ServerContext
-    private var client: ACPClient?
-    private var serveGateway: TUIGatewayClient?
-    private var eventTask: Task<Void, Never>?
-    private var healthMonitorTask: Task<Void, Never>?
-    private var reconnectTask: Task<Void, Never>?
+    /// Connection resources live in an unchecked box so `deinit` can
+    /// cancel them without `isolated deinit` — that form conflicts with
+    /// the `@Observable` macro on `@MainActor` types (IPA archive).
+    @ObservationIgnored
+    private let connection = ChatConnectionHandles()
+    private var client: ACPClient? {
+        get { connection.client }
+        set { connection.client = newValue }
+    }
+    private var serveGateway: TUIGatewayClient? {
+        get { connection.serveGateway }
+        set { connection.serveGateway = newValue }
+    }
+    private var eventTask: Task<Void, Never>? {
+        get { connection.eventTask }
+        set { connection.eventTask = newValue }
+    }
+    private var healthMonitorTask: Task<Void, Never>? {
+        get { connection.healthMonitorTask }
+        set { connection.healthMonitorTask = newValue }
+    }
+    private var reconnectTask: Task<Void, Never>? {
+        get { connection.reconnectTask }
+        set { connection.reconnectTask = newValue }
+    }
+    @ObservationIgnored
     private var isHandlingDisconnect = false
-    private var pendingDraftSave: Task<Void, Never>?
+    private var pendingDraftSave: Task<Void, Never>? {
+        get { connection.pendingDraftSave }
+        set { connection.pendingDraftSave = newValue }
+    }
 
     /// Bumped at the top of every start/resume pipeline so a newer
     /// sheet tap supersedes an in-flight connect (Mac
     /// `sessionStartGeneration` / `startStillCurrent`).
+    @ObservationIgnored
     private var sessionStartGeneration = 0
 
     /// Session id of the currently-active chat. Saved when state
@@ -1337,17 +1390,21 @@ final class ChatController {
     /// On Hermes Serve this is the **live** TUI-gateway runtime id
     /// (`session_id`) used by `prompt.submit`. See `lastStoredSessionID`
     /// for the durable key used by `session.resume`.
+    @ObservationIgnored
     private var lastActiveSessionID: String?
     /// Durable Hermes Serve session key (`stored_session_id` /
     /// `session_key`). Used to reattach after the WebSocket drops;
     /// falls back to `lastActiveSessionID` when Hermes omitted it.
+    @ObservationIgnored
     private var lastStoredSessionID: String?
     /// Optional project working directory of the currently-active
     /// session. Used as `cwd` on the recovery path so a project-
     /// scoped session reconnects with the right scope.
+    @ObservationIgnored
     private var lastProjectPath: String?
     /// Last Dashboard / coordinator resume target. Retry after a
     /// failed resume reuses this instead of opening a brand-new chat.
+    @ObservationIgnored
     private var lastResumeTargetID: String?
 
     /// Id to highlight in the Sessions sheet — durable resume target
@@ -1677,6 +1734,7 @@ final class ChatController {
     /// `forIOSApp` one, so unit tests can drive the real start()/send()
     /// path over an in-memory ACP channel. Nil in production. Mirrors
     /// `MiniAppAgentSession.clientFactory`.
+    @ObservationIgnored
     var clientFactory: ((_ projectCwd: String?) -> ACPClient)?
 
     private func makeClient(projectCwd: String? = nil) -> ACPClient {
@@ -2001,19 +2059,11 @@ final class ChatController {
     /// this the remote `hermes acp` process + SSH channel would linger after
     /// the view is gone. `deinit` can't await, so cancel the tasks
     /// synchronously and fire-and-forget the actor `stop()` — the same
-    /// pattern `CitadelServerTransport.deinit` uses. `isolated` so it runs
-    /// on the MainActor and can touch the actor-isolated task handles.
-    isolated deinit {
-        eventTask?.cancel()
-        healthMonitorTask?.cancel()
-        reconnectTask?.cancel()
-        pendingDraftSave?.cancel()
-        if let client {
-            Task { await client.stop() }
-        }
-        if let serveGateway {
-            Task { await serveGateway.close() }
-        }
+    /// pattern `CitadelServerTransport.deinit` uses. Teardown goes through
+    /// `ChatConnectionHandles` (not `isolated deinit`) so `@Observable`
+    /// can expand cleanly on this `@MainActor` type.
+    deinit {
+        connection.teardownOnDeinit()
     }
 
     /// Stop the current session + tear down the SSH exec channel.
