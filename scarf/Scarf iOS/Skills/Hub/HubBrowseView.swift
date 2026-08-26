@@ -16,6 +16,11 @@ struct HubBrowseView: View {
             content
         }
         .background(ScarfColor.backgroundPrimary)
+        .task {
+            if vm.context.isServe, vm.hubResults.isEmpty {
+                vm.browseHub()
+            }
+        }
     }
 
     @ViewBuilder

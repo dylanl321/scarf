@@ -27,10 +27,12 @@ struct SkillDetailView: View {
         List {
             Section("Location") {
                 LabeledContent("Category", value: skill.category)
-                Text(skill.path)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(ScarfColor.foregroundMuted)
-                    .textSelection(.enabled)
+                if !skill.path.isEmpty {
+                    Text(skill.path)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(ScarfColor.foregroundMuted)
+                        .textSelection(.enabled)
+                }
                 if !skill.enabled {
                     Label {
                         VStack(alignment: .leading, spacing: 2) {

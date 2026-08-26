@@ -374,6 +374,65 @@ import Foundation
         #expect(assignees[0].totalCount == 3)
     }
 
+    @Test func serveClientMapsSkillsAndHubWithoutSSH() async throws {
+        let session = ServeURLProtocol.makeSession(handler: { request in
+            let path = request.url?.path ?? ""
+            switch path {
+            case "/api/skills":
+                let body = """
+                [{"name":"claude-code","description":"Claude Code workflows","category":"autonomous-ai-agents","enabled":true},
+                 {"name":"ascii-art","description":"Draw ASCII","category":"creative","enabled":true}]
+                """
+                return (200, Data(body.utf8))
+            case "/api/skills/content":
+                #expect(request.url?.query?.contains("name=claude-code") == true)
+                return (200, Data(#"{"name":"claude-code","content":"Use Claude.","path":"/tmp/SKILL.md"}"#.utf8))
+            case "/api/skills/hub/sources":
+                return (200, Data(#"{"featured":[{"name":"1password","description":"1Password CLI","source":"official","identifier":"official/security/1password"}],"index_available":true}"#.utf8))
+            case "/api/skills/hub/search":
+                #expect(request.url?.query?.contains("q=honcho") == true)
+                return (200, Data(#"{"results":[{"name":"honcho","description":"Memory provider","source":"github","identifier":"honcho"}]}"#.utf8))
+            case "/api/skills/hub/install":
+                #expect(request.httpMethod == "POST")
+                #expect(ServeURLProtocol.bodyString(of: request).contains("honcho"))
+                return (200, Data(#"{"ok":true,"pid":12,"name":"install-honcho"}"#.utf8))
+            default:
+                return (404, Data())
+            }
+        })
+        let client = HermesServeClient(
+            config: HermesServeConfig(baseURL: "http://example.test:9119"),
+            session: session
+        )
+        let cats = try await client.listSkillCategories()
+        let all = cats.flatMap(\.skills)
+        #expect(all.count == 2)
+        let claude = all.first { $0.name == "claude-code" }
+        #expect(claude?.files == ["SKILL.md"])
+        #expect(claude?.summary == "Claude Code workflows")
+        #expect(claude?.category == "autonomous-ai-agents")
+        let content = try await client.fetchSkillContent(name: "claude-code")
+        #expect(content.content?.contains("Use Claude") == true)
+        let featured = try await client.listSkillHubFeatured()
+        #expect(featured.first?.identifier == "official/security/1password")
+        let found = try await client.searchSkillHub(query: "honcho")
+        #expect(found.first?.name == "honcho")
+        try await client.installHubSkill(identifier: "honcho")
+    }
+
+    @Test func serveSkillDTODefaultsMissingFilesToSkillMarkdown() {
+        let dto = HermesServeSkillDTO(
+            name: "codex",
+            description: "Codex skill",
+            category: "autonomous-ai-agents",
+            enabled: true
+        )
+        let skill = dto.asHermesSkill()
+        #expect(skill.files == ["SKILL.md"])
+        #expect(skill.summary == "Codex skill")
+        #expect(skill.path.isEmpty)
+    }
+
     @Test func serveClientListsWebhooksAndProfiles() async throws {
         let session = ServeURLProtocol.makeSession(handler: { request in
             switch request.url?.path {

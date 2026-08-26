@@ -42,9 +42,16 @@ struct InstalledSkillsListView: View {
                                         .font(.body)
                                         .foregroundStyle(skill.enabled ? .primary : .secondary)
                                         .strikethrough(!skill.enabled, color: .secondary)
-                                    Text("\(skill.files.count) file\(skill.files.count == 1 ? "" : "s")")
-                                        .font(.caption)
-                                        .foregroundStyle(ScarfColor.foregroundMuted)
+                                    if let summary = skill.summary, !summary.isEmpty {
+                                        Text(summary)
+                                            .font(.caption)
+                                            .foregroundStyle(ScarfColor.foregroundMuted)
+                                            .lineLimit(2)
+                                    } else {
+                                        Text("\(skill.files.count) file\(skill.files.count == 1 ? "" : "s")")
+                                            .font(.caption)
+                                            .foregroundStyle(ScarfColor.foregroundMuted)
+                                    }
                                 }
                                 Spacer(minLength: 0)
                                 if skill.pinned {
